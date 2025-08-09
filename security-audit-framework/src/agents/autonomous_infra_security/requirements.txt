@@ -1,0 +1,6 @@
+boto3==1.34.23
+botocore==1.34.23
+aiofiles==23.2.1
+asyncio==3.4.3
+pydantic==2.5.3
+pyyaml==6.0.1

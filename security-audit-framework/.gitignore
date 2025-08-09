@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.log
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# CDK
+*.swp
+.cdk.staging
+cdk.out/
+cdk.context.json
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# AWS
+.aws-sam/
+
+# Docker
+.dockerignore
+
+# Terraform (if needed later)
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Security
+*.pem
+*.key
+*.crt
+*.p12
+
+# Test outputs
+test-results/
+coverage/
+
+# Node modules (for CDK CLI)
+node_modules/
+package-lock.json
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/

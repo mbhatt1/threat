@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" 
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    
+    <parent>
+        <groupId>org.jenkins-ci.plugins</groupId>
+        <artifactId>plugin</artifactId>
+        <version>4.51</version>
+        <relativePath/>
+    </parent>
+    
+    <groupId>io.jenkins.plugins</groupId>
+    <artifactId>ai-security-scanner</artifactId>
+    <version>1.0.0</version>
+    <packaging>hpi</packaging>
+    
+    <name>AI Security Scanner Plugin</name>
+    <description>AI-powered security scanning for Jenkins CI/CD pipelines using AWS Bedrock</description>
+    <url>https://github.com/example/ai-security-scanner-jenkins-plugin</url>
+    
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+        </license>
+    </licenses>
+    
+    <developers>
+        <developer>
+            <id>ai-security-team</id>
+            <name>AI Security Team</name>
+            <email>security-framework@example.com</email>
+        </developer>
+    </developers>
+    
+    <scm>
+        <connection>scm:git:git://github.com/example/ai-security-scanner-jenkins-plugin.git</connection>
+        <developerConnection>scm:git:git@github.com:example/ai-security-scanner-jenkins-plugin.git</developerConnection>
+        <url>https://github.com/example/ai-security-scanner-jenkins-plugin</url>
+        <tag>HEAD</tag>
+    </scm>
+    
+    <properties>
+        <jenkins.version>2.387.3</jenkins.version>
+        <java.level>11</java.level>
+        <aws.sdk.version>2.20.162</aws.sdk.version>
+    </properties>
+    
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.jenkins.tools.bom</groupId>
+                <artifactId>bom-2.387.x</artifactId>
+                <version>2102.v854b_fec19c92</version>
+                <scope>import</scope>
+                <type>pom</type>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+    
+    <dependencies>
+        <!-- Jenkins Core -->
+        <dependency>
+            <groupId>org.jenkins-ci.plugins</groupId>
+            <artifactId>structs</artifactId>
+        </dependency>
+        
+        <!-- Pipeline Support -->
+        <dependency>
+            <groupId>org.jenkins-ci.plugins.workflow</groupId>
+            <artifactId>workflow-step-api</artifactId>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.jenkins-ci.plugins.workflow</groupId>
+            <artifactId>workflow-cps</artifactId>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.jenkins-ci.plugins.workflow</groupId>
+            <artifactId>workflow-job</artifactId>
+        </dependency>
+        
+        <!-- AWS SDK -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>lambda</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+        
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+        
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+        
+        <!-- Credentials Plugin -->
+        <dependency>
+            <groupId>org.jenkins-ci.plugins</groupId>
+            <artifactId>credentials</artifactId>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.jenkins-ci.plugins</groupId>
+            <artifactId>aws-credentials</artifactId>
+            <version>191.vcb_f183ce58b_9</version>
+        </dependency>
+        
+        <!-- HTML Publisher for Reports -->
+        <dependency>
+            <groupId>org.jenkins-ci.plugins</groupId>
+            <artifactId>htmlpublisher</artifactId>
+            <version>1.31</version>
+        </dependency>
+        
+        <!-- JSON Processing -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.15.2</version>
+        </dependency>
+        
+        <!-- Testing -->
+        <dependency>
+            <groupId>org.jenkins-ci.plugins.workflow</groupId>
+            <artifactId>workflow-basic-steps</artifactId>
+            <scope>test</scope>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.jenkins-ci.plugins.workflow</groupId>
+            <artifactId>workflow-durable-task-step</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    
+    <repositories>
+        <repository>
+            <id>repo.jenkins-ci.org</id>
+            <url>https://repo.jenkins-ci.org/public/</url>
+        </repository>
+    </repositories>
+    
+    <pluginRepositories>
+        <pluginRepository>
+            <id>repo.jenkins-ci.org</id>
+            <url>https://repo.jenkins-ci.org/public/</url>
+        </pluginRepository>
+    </pluginRepositories>
+</project>
