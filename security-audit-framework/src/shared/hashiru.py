@@ -708,10 +708,24 @@ class ExecutionPlanner:
         if repo_path:
             self.sub_ceo_agent = SubCEOAgent(repo_path)
         
-    def create_execution_plan(self, repo_analysis: Dict[str, Any],
+    async def create_execution_plan(self, repo_analysis: Dict[str, Any],
                             priority: str = 'normal') -> Dict[str, Any]:
-        """Create an optimized execution plan based on repository analysis"""
+        """Create an optimized execution plan based on repository analysis and agent performance"""
         recommendations = repo_analysis.get('recommended_agents', [])
+        
+        # Get top performing agents
+        top_performers = await self.performance_manager.get_top_performers()
+        top_performer_types = {p['agent_type'] for p in top_performers}
+        
+        # Check agent employment status
+        agent_statuses = {}
+        for rec in recommendations:
+            agent_type = rec['agent']
+            history = self.performance_manager._get_agent_history(agent_type)
+            if history:
+                latest = history[0]
+                status = self.performance_manager._evaluate_employment_status(latest)
+                agent_statuses[agent_type] = status
         
         # Use Sub-CEO agent for file prioritization if available
         file_analysis = None
@@ -751,14 +765,37 @@ class ExecutionPlanner:
                 logger.warning(f"Skipping {agent_type} due to budget constraints")
                 continue
             
+            # Check if agent is "fired" or on probation
+            agent_status = agent_statuses.get(agent_type, {})
+            if agent_status.get('status') == 'fired':
+                logger.warning(f"Skipping {agent_type} - Agent fired for poor performance")
+                continue
+            
+            # Adjust priority based on performance
+            task_priority = rec['priority']
+            if agent_type in top_performer_types:
+                task_priority = 'high' if task_priority == 'normal' else task_priority
+                logger.info(f"Promoting {agent_type} to higher priority - top performer")
+            elif agent_status.get('status') == 'probation':
+                task_priority = 'low'
+                logger.warning(f"Demoting {agent_type} to low priority - on probation")
+            
+            # Adjust resources for top performers
+            if agent_type in top_performer_types:
+                resources['vcpus'] *= 1.5  # Give 50% more CPU
+                resources['memory_gb'] *= 1.5  # Give 50% more memory
+                logger.info(f"Allocating extra resources to top performer {agent_type}")
+            
             tasks.append({
                 'agent_type': agent_type,
-                'priority': rec['priority'],
+                'priority': task_priority,
                 'resources': resources,
                 'use_spot': use_spot,
                 'estimated_runtime': runtime,
                 'estimated_cost': task_cost,
-                'config': self._get_agent_config(agent_type)
+                'config': self._get_agent_config(agent_type),
+                'performance_status': agent_status.get('status', 'new'),
+                'is_top_performer': agent_type in top_performer_types
             })
             
             total_estimated_cost += task_cost
@@ -774,7 +811,10 @@ class ExecutionPlanner:
             'total_estimated_cost': round(total_estimated_cost, 4),
             'total_estimated_time': total_estimated_time,
             'max_parallel_tasks': min(len(tasks), 5),  # Limit parallelism
-            'execution_strategy': 'parallel' if len(tasks) > 1 else 'sequential'
+            'execution_strategy': 'parallel' if len(tasks) > 1 else 'sequential',
+            'performance_optimized': True,
+            'top_performers': [t['agent_type'] for t in tasks if t.get('is_top_performer')],
+            'agents_on_probation': [t['agent_type'] for t in tasks if t.get('performance_status') == 'probation']
         }
     
     def _get_agent_resources(self, agent_type: str) -> Dict[str, float]:
