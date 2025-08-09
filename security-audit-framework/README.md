@@ -176,13 +176,55 @@ Results are stored in S3 and can be viewed via:
 - API queries
 - Direct S3 access
 
-## 💰 Cost Optimization
+## 💰 Cost Optimization & Performance Management
 
-The framework includes HASHIRU (Heuristic AWS Spend Holistic Intelligence Resource Utilization) which:
-- Monitors real-time AWS costs
+The framework includes HASHIRU (Heuristic Analysis and Strategic Hierarchical Intelligence for Resource Utilization) which:
+
+### Cost Optimization
+- Monitors real-time AWS costs via Cost Explorer
 - Predicts scan costs before execution
-- Optimizes resource allocation
-- Uses spot instances where possible
+- Optimizes resource allocation (CPU/Memory)
+- Uses spot instances where possible (up to 70% savings)
+
+### Agent Performance Management
+HASHIRU now actively manages agent performance by:
+
+#### Performance Tracking
+- **Accuracy Monitoring**: Tracks true positive vs false positive rates
+- **Execution Time**: Monitors if agents meet expected completion times
+- **Quality Scoring**: Evaluates the quality of security findings
+- **Historical Analysis**: Maintains performance history in DynamoDB
+
+#### Employment Decisions
+Agents are automatically evaluated and can be:
+- **Promoted**: Top performers get more resources and higher priority
+- **Retained**: Good performers continue normally
+- **Warned**: Single performance issue triggers monitoring
+- **Probation**: Multiple issues result in reduced priority
+- **Fired**: Consistently poor performers are disabled
+
+#### Performance Thresholds
+- Minimum 85% accuracy required
+- Maximum 15% false positive rate
+- Must complete within 2x expected time
+- Minimum 0.7 quality score for findings
+
+#### Resource Allocation
+- Top performers receive 50% more CPU and memory
+- Underperformers get reduced priority in task queues
+- "Fired" agents are automatically excluded from scans
+
+Example metrics stored for each agent:
+```json
+{
+  "agent_type": "SAST",
+  "accuracy": 0.92,
+  "false_positive_rate": 0.08,
+  "execution_time_ratio": 1.2,
+  "quality_score": 0.85,
+  "employment_status": "promoted"
+}
+```
 
 ## 🔐 Security
 
