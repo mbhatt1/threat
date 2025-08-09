@@ -23,6 +23,7 @@ from shared.business_context import BusinessContextEngine
 s3_client = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
 bedrock_runtime = boto3.client('bedrock-runtime')
+lambda_client = boto3.client('lambda')
 
 
 class AIReportGenerator:
@@ -101,6 +102,12 @@ class AIReportGenerator:
         # Save report to S3
         report_urls = self._save_comprehensive_report(scan_id, report)
         
+        # Ensure Athena tables are set up
+        self._invoke_athena_setup()
+        
+        # Generate QuickSight dashboard
+        dashboard_url = self._invoke_quicksight_dashboard(scan_id, scan_info)
+        
         # Update scan records with report location
         self._update_scan_records(scan_id, ai_scan_id, report_urls)
         
@@ -109,7 +116,8 @@ class AIReportGenerator:
             'report_urls': report_urls,
             'summary': executive_summary,
             'total_findings': report['statistics'].get('total_findings', 0),
-            'risk_level': executive_summary.get('risk_level', 'UNKNOWN')
+            'risk_level': executive_summary.get('risk_level', 'UNKNOWN'),
+            'dashboard_url': dashboard_url
         }
     
     def _get_ai_scan_info(self, ai_scan_id: str) -> Dict[str, Any]:
@@ -1310,6 +1318,55 @@ Format as JSON:
                 })
         
         return patterns[:5]  # Top 5 patterns
+    
+    def _invoke_athena_setup(self):
+        """Invoke Athena setup Lambda to ensure tables are created"""
+        try:
+            athena_lambda_name = os.environ.get('ATHENA_SETUP_LAMBDA_NAME', 'AthenaSetupLambda')
+            
+            response = lambda_client.invoke(
+                FunctionName=athena_lambda_name,
+                InvocationType='RequestResponse',
+                Payload=json.dumps({
+                    'action': 'setup_all'
+                })
+            )
+            
+            result = json.loads(response['Payload'].read())
+            if result.get('statusCode') == 200:
+                print("Athena tables setup successful")
+            else:
+                print(f"Athena setup warning: {result.get('error', 'Unknown error')}")
+                
+        except Exception as e:
+            print(f"Error invoking Athena setup: {e}")
+            # Continue even if Athena setup fails
+    
+    def _invoke_quicksight_dashboard(self, scan_id: str, scan_metadata: Dict[str, Any]) -> str:
+        """Invoke QuickSight dashboard Lambda to create visualization"""
+        try:
+            quicksight_lambda_name = os.environ.get('QUICKSIGHT_LAMBDA_NAME', 'QuickSightDashboardLambda')
+            
+            response = lambda_client.invoke(
+                FunctionName=quicksight_lambda_name,
+                InvocationType='RequestResponse',
+                Payload=json.dumps({
+                    'scan_id': scan_id,
+                    'scan_metadata': scan_metadata
+                })
+            )
+            
+            result = json.loads(response['Payload'].read())
+            if result.get('statusCode') == 200:
+                print(f"QuickSight dashboard created: {result.get('dashboard_url')}")
+                return result.get('dashboard_url', '')
+            else:
+                print(f"QuickSight dashboard creation failed: {result.get('error', 'Unknown error')}")
+                return ''
+                
+        except Exception as e:
+            print(f"Error invoking QuickSight dashboard: {e}")
+            return ''
 
 
 def handler(event, context):

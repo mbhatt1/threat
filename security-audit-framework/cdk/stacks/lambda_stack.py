@@ -29,6 +29,7 @@ class LambdaStack(Stack):
                  quicksight_dashboard_role: iam.Role,
                  remediation_lambda_role: iam.Role,
                  ai_security_role: iam.Role,
+                 athena_setup_role: iam.Role,
                  results_bucket: s3.Bucket,
                  scan_table: dynamodb.Table,
                  remediation_table: dynamodb.Table,
@@ -87,6 +88,35 @@ class LambdaStack(Stack):
         # Grant git binary execution permissions
         self.ceo_agent_lambda.add_environment("GIT_PYTHON_GIT_EXECUTABLE", "/opt/bin/git")
         
+        # Repository Cloner Lambda
+        self.repository_cloner_lambda = lambda_python.PythonFunction(
+            self, "RepositoryClonerLambda",
+            entry=os.path.join("..", "src", "lambdas", "repository_cloner"),
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.handler",
+            index="handler.py",
+            role=ceo_agent_role,  # Reuse CEO agent role as it has similar permissions
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[lambda_security_group],
+            environment={
+                **common_env,
+                "EFS_MOUNT_PATH": "/mnt/efs",
+            },
+            timeout=Duration.minutes(10),  # Allow more time for large repos
+            memory_size=2048,
+            layers=[shared_layer],
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+            description="Clones Git repositories for security scanning",
+            filesystem=lambda_.FileSystem.from_efs_access_point(
+                efs_access_point,
+                "/mnt/efs"
+            )
+        )
+        
+        # Grant permissions to access git binary
+        self.repository_cloner_lambda.add_environment("GIT_PYTHON_GIT_EXECUTABLE", "/usr/bin/git")
+        
         # Aggregator Lambda
         self.aggregator_lambda = lambda_python.PythonFunction(
             self, "AggregatorLambda",
@@ -140,7 +170,7 @@ class LambdaStack(Stack):
             environment={
                 **common_env,
                 "AWS_ACCOUNT_ID": self.account,
-                "ATHENA_DATABASE": "security_scans",
+                "ATHENA_DATABASE": "security_audit_findings",
                 "QUICKSIGHT_USER_ARN": f"arn:aws:quicksight:{self.region}:{self.account}:user/default/Admin",
                 "QUICKSIGHT_NAMESPACE": "default"
             },
@@ -214,6 +244,28 @@ class LambdaStack(Stack):
         
         # Make AI Security Analyzer Lambda accessible
         self.ai_security_analyzer_lambda_arn = self.ai_security_analyzer_lambda.function_arn
+        
+        # Athena Setup Lambda
+        self.athena_setup_lambda = lambda_python.PythonFunction(
+            self, "AthenaSetupLambda",
+            entry=os.path.join("..", "src", "lambdas", "athena_setup"),
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.lambda_handler",
+            index="handler.py",
+            role=athena_setup_role,
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            environment={
+                **common_env,
+                "ATHENA_DATABASE": "security_audit_findings",
+                "ATHENA_RESULTS_LOCATION": f"s3://{results_bucket.bucket_name}/athena-results/"
+            },
+            timeout=Duration.minutes(5),
+            memory_size=512,
+            layers=[shared_layer],
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+            description="Sets up Athena tables and views for security findings analysis"
+        )
         
         # SNS Handler Lambda
         self.sns_handler_lambda = lambda_.Function(

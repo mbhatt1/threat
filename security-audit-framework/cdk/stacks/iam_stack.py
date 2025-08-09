@@ -384,3 +384,390 @@ class IAMStack(Stack):
                 f"arn:aws:states:{self.region}:{self.account}:stateMachine:*"
             ]
         ))
+        
+        # QuickSight Dashboard Lambda Role
+        self.quicksight_dashboard_role = iam.Role(
+            self, "QuickSightDashboardRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole")
+            ],
+            description="Role for QuickSight Dashboard Lambda function"
+        )
+        
+        # Grant QuickSight Dashboard Lambda permissions
+        scan_table.grant_read_write_data(self.quicksight_dashboard_role)
+        results_bucket.grant_read_write(self.quicksight_dashboard_role)
+        
+        # QuickSight permissions for dashboard creation and management
+        self.quicksight_dashboard_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                # Data source permissions
+                "quicksight:CreateDataSource",
+                "quicksight:DescribeDataSource",
+                "quicksight:DescribeDataSourcePermissions",
+                "quicksight:PassDataSource",
+                "quicksight:UpdateDataSource",
+                "quicksight:DeleteDataSource",
+                "quicksight:UpdateDataSourcePermissions",
+                # Dataset permissions
+                "quicksight:CreateDataSet",
+                "quicksight:DescribeDataSet",
+                "quicksight:DescribeDataSetPermissions",
+                "quicksight:PassDataSet",
+                "quicksight:DescribeIngestion",
+                "quicksight:ListIngestions",
+                "quicksight:UpdateDataSet",
+                "quicksight:DeleteDataSet",
+                "quicksight:CreateIngestion",
+                "quicksight:CancelIngestion",
+                "quicksight:UpdateDataSetPermissions",
+                # Analysis permissions
+                "quicksight:CreateAnalysis",
+                "quicksight:DescribeAnalysis",
+                "quicksight:DescribeAnalysisPermissions",
+                "quicksight:UpdateAnalysis",
+                "quicksight:DeleteAnalysis",
+                "quicksight:QueryAnalysis",
+                "quicksight:RestoreAnalysis",
+                "quicksight:UpdateAnalysisPermissions",
+                # Dashboard permissions
+                "quicksight:CreateDashboard",
+                "quicksight:DescribeDashboard",
+                "quicksight:ListDashboardVersions",
+                "quicksight:UpdateDashboardPermissions",
+                "quicksight:QueryDashboard",
+                "quicksight:UpdateDashboard",
+                "quicksight:DeleteDashboard",
+                "quicksight:DescribeDashboardPermissions",
+                "quicksight:UpdateDashboardPublishedVersion",
+                # Template permissions
+                "quicksight:CreateTemplate",
+                "quicksight:DescribeTemplate",
+                "quicksight:UpdateTemplate",
+                "quicksight:DeleteTemplate",
+                "quicksight:UpdateTemplatePermissions",
+                "quicksight:DescribeTemplatePermissions",
+                # Embed URL permissions
+                "quicksight:GenerateEmbedUrlForAnonymousUser",
+                "quicksight:GenerateEmbedUrlForRegisteredUser",
+                # Other necessary permissions
+                "quicksight:ListUserGroups",
+                "quicksight:DescribeAccountSettings",
+                "quicksight:DescribeUser"
+            ],
+            resources=["*"]
+        ))
+        
+        # Athena permissions for QuickSight data source
+        self.quicksight_dashboard_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "athena:GetDatabase",
+                "athena:GetDataCatalog",
+                "athena:GetTableMetadata",
+                "athena:ListDatabases",
+                "athena:ListTableMetadata",
+                "athena:StartQueryExecution",
+                "athena:StopQueryExecution",
+                "athena:GetQueryExecution",
+                "athena:GetQueryResults",
+                "athena:GetWorkGroup"
+            ],
+            resources=["*"]
+        ))
+        
+        # Glue catalog permissions for Athena
+        self.quicksight_dashboard_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "glue:GetDatabase",
+                "glue:GetDatabases",
+                "glue:GetTable",
+                "glue:GetTables",
+                "glue:GetPartitions"
+            ],
+            resources=["*"]
+        ))
+        
+        # S3 permissions for Athena query results
+        self.quicksight_dashboard_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "s3:GetBucketLocation",
+                "s3:GetObject",
+                "s3:ListBucket",
+                "s3:PutObject",
+                "s3:GetObjectVersion"
+            ],
+            resources=[
+                results_bucket.bucket_arn,
+                f"{results_bucket.bucket_arn}/*"
+            ]
+        ))
+        
+        # CEO Agent Lambda Role
+        self.ceo_agent_role = iam.Role(
+            self, "CEOAgentRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole")
+            ],
+            description="Role for CEO Agent Lambda function"
+        )
+        
+        # Grant CEO Agent permissions
+        scan_table.grant_read_write_data(self.ceo_agent_role)
+        results_bucket.grant_read_write(self.ceo_agent_role)
+        
+        # Bedrock access for AI-powered CEO agent
+        self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream"
+            ],
+            resources=[
+                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-sonnet*",
+                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-opus*",
+                f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-instant*"
+            ]
+        ))
+        
+        # Cost Explorer access for budget management
+        self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "ce:GetCostAndUsage",
+                "ce:GetCostForecast",
+                "pricing:GetProducts",
+                "pricing:DescribeServices"
+            ],
+            resources=["*"]
+        ))
+        
+        # ECS permissions for CEO agent to orchestrate tasks
+        self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "ecs:RunTask",
+                "ecs:StopTask",
+                "ecs:DescribeTasks"
+            ],
+            resources=["*"]
+        ))
+        
+        # Pass role permissions for ECS tasks
+        self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=["iam:PassRole"],
+            resources=[
+                self.task_execution_role.role_arn,
+                self.autonomous_task_role.role_arn,
+                self.bedrock_unified_task_role.role_arn
+            ]
+        ))
+        
+        # EFS permissions for repository access
+        self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "elasticfilesystem:ClientMount",
+                "elasticfilesystem:ClientWrite",
+                "elasticfilesystem:DescribeMountTargets"
+            ],
+            resources=["*"]
+        ))
+        
+        # Secrets Manager access for Git credentials
+        self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=["secretsmanager:GetSecretValue"],
+            resources=["arn:aws:secretsmanager:*:*:secret:*"]
+        ))
+        
+        # Aggregator Lambda Role
+        self.aggregator_role = iam.Role(
+            self, "AggregatorRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole")
+            ],
+            description="Role for Aggregator Lambda function"
+        )
+        
+        # Grant Aggregator permissions
+        scan_table.grant_read_write_data(self.aggregator_role)
+        results_bucket.grant_read_write(self.aggregator_role)
+        
+        # DynamoDB access for deduplication
+        self.aggregator_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:BatchWriteItem"
+            ],
+            resources=[
+                f"arn:aws:dynamodb:{self.region}:{self.account}:table/*"
+            ]
+        ))
+        
+        # Report Generator Lambda Role
+        self.report_generator_role = iam.Role(
+            self, "ReportGeneratorRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole")
+            ],
+            description="Role for Report Generator Lambda function"
+        )
+        
+        # Grant Report Generator permissions
+        scan_table.grant_read_write_data(self.report_generator_role)
+        results_bucket.grant_read_write(self.report_generator_role)
+        
+        # SES permissions for email reports
+        self.report_generator_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "ses:SendEmail",
+                "ses:SendRawEmail"
+            ],
+            resources=["*"]
+        ))
+        
+        # SNS permissions for notifications
+        self.report_generator_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=["sns:Publish"],
+            resources=["*"]
+        ))
+        
+        # Lambda invoke permissions for QuickSight dashboard generation
+        self.report_generator_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=["lambda:InvokeFunction"],
+            resources=[
+                f"arn:aws:lambda:{self.region}:{self.account}:function:*"
+            ]
+        ))
+        
+        # Remediation Lambda Role
+        self.remediation_lambda_role = iam.Role(
+            self, "RemediationLambdaRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole")
+            ],
+            description="Role for Remediation Lambda function"
+        )
+        
+        # Grant Remediation Lambda permissions
+        scan_table.grant_read_write_data(self.remediation_lambda_role)
+        results_bucket.grant_read_write(self.remediation_lambda_role)
+        
+        # IAM permissions for remediation actions
+        self.remediation_lambda_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "iam:UpdateAccessKey",
+                "iam:DeleteAccessKey",
+                "iam:TagUser",
+                "iam:TagRole"
+            ],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "aws:RequestedRegion": self.region
+                }
+            }
+        ))
+        
+        # Secrets Manager permissions for rotation
+        self.remediation_lambda_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "secretsmanager:RotateSecret",
+                "secretsmanager:UpdateSecretVersionStage"
+            ],
+            resources=["*"]
+        ))
+        
+        # SNS permissions for alerts
+        self.remediation_lambda_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=["sns:Publish"],
+            resources=["*"]
+        ))
+        
+        # Athena Setup Lambda Role
+        self.athena_setup_role = iam.Role(
+            self, "AthenaSetupRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole")
+            ],
+            description="Role for Athena Setup Lambda function"
+        )
+        
+        # Grant Athena Setup permissions
+        scan_table.grant_read_write_data(self.athena_setup_role)
+        results_bucket.grant_read_write(self.athena_setup_role)
+        
+        # Athena permissions
+        self.athena_setup_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "athena:*"
+            ],
+            resources=["*"]
+        ))
+        
+        # Glue permissions for database and table operations
+        self.athena_setup_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "glue:CreateDatabase",
+                "glue:GetDatabase",
+                "glue:GetDatabases",
+                "glue:UpdateDatabase",
+                "glue:DeleteDatabase",
+                "glue:CreateTable",
+                "glue:GetTable",
+                "glue:GetTables",
+                "glue:UpdateTable",
+                "glue:DeleteTable",
+                "glue:BatchCreatePartition",
+                "glue:CreatePartition",
+                "glue:GetPartition",
+                "glue:GetPartitions",
+                "glue:UpdatePartition",
+                "glue:DeletePartition",
+                "glue:BatchDeletePartition"
+            ],
+            resources=["*"]
+        ))
+        
+        # S3 permissions for Athena query results and data access
+        self.athena_setup_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "s3:GetBucketLocation",
+                "s3:GetObject",
+                "s3:ListBucket",
+                "s3:PutObject",
+                "s3:GetObjectVersion",
+                "s3:ListBucketMultipartUploads",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"
+            ],
+            resources=[
+                results_bucket.bucket_arn,
+                f"{results_bucket.bucket_arn}/*"
+            ]
+        ))

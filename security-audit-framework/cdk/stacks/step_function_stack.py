@@ -36,10 +36,16 @@ class StepFunctionStack(Stack):
         # Clone repository task
         clone_repo_task = tasks.LambdaInvoke(
             self, "CloneRepository",
-            lambda_function=lambda_.Function.from_function_name(
+            lambda_function=lambda_.Function.from_function_arn(
                 self, "CloneRepoFn",
-                "repository-cloner"
+                f"arn:aws:lambda:{self.region}:{self.account}:function:{construct_id}-RepositoryClonerLambda*"
             ),
+            payload=sfn.TaskInput.from_object({
+                "repository_url": sfn.JsonPath.string_at("$.repository_url"),
+                "branch": sfn.JsonPath.string_at("$.branch"),
+                "scan_id": sfn.JsonPath.string_at("$.scan_id"),
+                "storage_type": "efs"
+            }),
             payload_response_only=True,
             result_path="$.repository"
         )

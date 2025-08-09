@@ -9,6 +9,9 @@ from datetime import datetime
 from typing import Dict, List, Any
 import uuid
 from pathlib import Path
+from botocore.exceptions import ClientError
+from functools import wraps
+import time
 
 # Add parent directories to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -19,11 +22,47 @@ from shared.strands import StrandsMessage, MessageType
 from shared.hashiru import HashiruOptimizer
 from shared.business_context import BusinessContextEngine
 
-# AWS clients
-stepfunctions = boto3.client('stepfunctions')
-dynamodb = boto3.resource('dynamodb')
-bedrock_runtime = boto3.client('bedrock-runtime')
-s3_client = boto3.client('s3')
+# AWS clients with retry configuration
+from botocore.config import Config
+
+retry_config = Config(
+    retries={
+        'max_attempts': 3,
+        'mode': 'adaptive'
+    }
+)
+
+stepfunctions = boto3.client('stepfunctions', config=retry_config)
+dynamodb = boto3.resource('dynamodb', config=retry_config)
+bedrock_runtime = boto3.client('bedrock-runtime', config=retry_config)
+s3_client = boto3.client('s3', config=retry_config)
+
+
+def retry_on_exception(max_retries=3, delay=1, backoff=2, exceptions=(Exception,)):
+    """
+    Decorator to retry function calls with exponential backoff
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retry_count = 0
+            current_delay = delay
+            
+            while retry_count < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        raise
+                    
+                    print(f"Attempt {retry_count} failed: {str(e)}. Retrying in {current_delay} seconds...")
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+                    
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 class AICEOAgent:
@@ -43,6 +82,7 @@ class AICEOAgent:
         self.state_machine_arn = os.environ.get('STATE_MACHINE_ARN')
         self.model_id = os.environ.get('BEDROCK_MODEL_ID', 'anthropic.claude-3-sonnet-20240229-v1:0')
         
+    @retry_on_exception(max_retries=3, exceptions=(ClientError,))
     async def process_scan_request(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Process scan request and orchestrate AI-based security scanning"""
         
@@ -50,6 +90,9 @@ class AICEOAgent:
         repository_url = event.get('repository_url')
         branch = event.get('branch', 'main')
         scan_options = event.get('scan_options', {})
+        
+        if not repository_url:
+            raise ValueError("repository_url is required in the event")
         
         # Generate scan ID
         scan_id = str(uuid.uuid4())
@@ -65,8 +108,14 @@ class AICEOAgent:
             'scan_options': scan_options
         }
         
-        # Store in DynamoDB
-        self.scan_table.put_item(Item=scan_record)
+        # Store in DynamoDB with retry
+        try:
+            self.scan_table.put_item(Item=scan_record)
+        except ClientError as e:
+            print(f"Failed to store scan record: {e}")
+            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+                raise ValueError(f"DynamoDB table {self.scan_table.table_name} not found")
+            raise
         
         # Use AI to determine optimal scanning strategy
         scan_strategy = await self._determine_scan_strategy(repository_url, scan_options)

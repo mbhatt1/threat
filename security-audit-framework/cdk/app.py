@@ -14,6 +14,7 @@ from stacks.step_function_stack import StepFunctionStack
 from stacks.api_stack import APIStack
 from stacks.sns_stack import SnsStack
 from stacks.monitoring_stack import MonitoringStack
+from stacks.bedrock_stack import BedrockSecurityStack
 
 app = cdk.App()
 
@@ -53,12 +54,13 @@ iam_stack = IAMStack(
 lambda_stack = LambdaStack(
     app, f"{stack_prefix}-Lambda",
     vpc=network_stack.vpc,
-    ceo_agent_role=iam_stack.lambda_role,
-    aggregator_role=iam_stack.lambda_role,
-    report_generator_role=iam_stack.lambda_role,
-    quicksight_dashboard_role=iam_stack.lambda_role,
-    remediation_lambda_role=iam_stack.lambda_role,
+    ceo_agent_role=iam_stack.ceo_agent_role,
+    aggregator_role=iam_stack.aggregator_role,
+    report_generator_role=iam_stack.report_generator_role,
+    quicksight_dashboard_role=iam_stack.quicksight_dashboard_role,
+    remediation_lambda_role=iam_stack.remediation_lambda_role,
     ai_security_role=iam_stack.ai_security_role,
+    athena_setup_role=iam_stack.athena_setup_role,
     results_bucket=storage_stack.results_bucket,
     scan_table=storage_stack.scan_table,
     remediation_table=storage_stack.remediation_table,
@@ -107,11 +109,24 @@ ecs_stack.add_dependency(storage_stack)
 ecs_stack.add_dependency(iam_stack)
 ecs_stack.add_dependency(lambda_stack)
 
+# Bedrock AI Security Stack
+bedrock_stack = BedrockSecurityStack(
+    app, f"{stack_prefix}-Bedrock",
+    vpc=network_stack.vpc,
+    ecs_cluster=ecs_stack.cluster,
+    results_bucket=storage_stack.results_bucket,
+    scan_table=storage_stack.scan_table,
+    env=env,
+    description="Bedrock AI-powered security scanning components"
+)
+bedrock_stack.add_dependency(network_stack)
+bedrock_stack.add_dependency(ecs_stack)
+bedrock_stack.add_dependency(storage_stack)
 
 # Step Functions for workflow orchestration
 step_function_stack = StepFunctionStack(
     app, f"{stack_prefix}-StepFunctions",
-    ceo_agent_lambda=lambda_stack.ceo_lambda,
+    ceo_agent_lambda=lambda_stack.ceo_agent_lambda,
     ecs_cluster=ecs_stack.cluster,
     sns_topic=sns_stack.main_topic,
     aggregator_lambda=lambda_stack.aggregator_lambda,
@@ -149,10 +164,12 @@ api_stack.add_dependency(step_function_stack)
 monitoring_stack = MonitoringStack(
     app, f"{stack_prefix}-Monitoring",
     lambdas=[
-        lambda_stack.ceo_lambda,
+        lambda_stack.ceo_agent_lambda,
         lambda_stack.aggregator_lambda,
         lambda_stack.report_generator_lambda,
-        lambda_stack.remediation_lambda
+        lambda_stack.remediation_lambda,
+        lambda_stack.quicksight_dashboard_lambda,
+        lambda_stack.athena_setup_lambda
     ],
     state_machine=step_function_stack.state_machine,
     api=api_stack.api,
