@@ -606,6 +606,31 @@ Return a JSON object with:
                 )
             except Exception as e:
                 print(f"Error updating scan status: {e}")
+    
+    def _invoke_data_transformer(self, ai_scan_id: str):
+        """Invoke data transformer Lambda to prepare data for Athena"""
+        try:
+            data_transformer_lambda = os.environ.get('DATA_TRANSFORMER_LAMBDA_NAME', 'DataTransformerLambda')
+            
+            # Extract original scan_id from ai_scan_id
+            scan_id = ai_scan_id.replace('ai-scan-', '') if ai_scan_id.startswith('ai-scan-') else ai_scan_id
+            
+            response = lambda_client.invoke(
+                FunctionName=data_transformer_lambda,
+                InvocationType='Event',  # Async invocation
+                Payload=json.dumps({
+                    'scan_id': scan_id
+                })
+            )
+            
+            if response['StatusCode'] == 202:
+                print(f"Data transformer invoked successfully for scan_id: {scan_id}")
+            else:
+                print(f"Data transformer invocation failed with status: {response['StatusCode']}")
+                
+        except Exception as e:
+            print(f"Error invoking data transformer: {e}")
+            # Continue processing even if transformation fails
 
 
 def handler(event, context):

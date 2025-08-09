@@ -11,6 +11,7 @@ from aws_cdk import (
     aws_dynamodb as dynamodb,
     aws_logs as logs,
     aws_efs as efs,
+    aws_lambda_destinations as lambda_destinations,
     Duration,
     RemovalPolicy
 )
@@ -30,6 +31,7 @@ class LambdaStack(Stack):
                  remediation_lambda_role: iam.Role,
                  ai_security_role: iam.Role,
                  athena_setup_role: iam.Role,
+                 data_transformer_role: iam.Role,
                  results_bucket: s3.Bucket,
                  scan_table: dynamodb.Table,
                  remediation_table: dynamodb.Table,
@@ -186,8 +188,24 @@ class LambdaStack(Stack):
             "QUICKSIGHT_LAMBDA_NAME", self.quicksight_dashboard_lambda.function_name
         )
         
+        # Add Athena setup Lambda name to report generator environment
+        self.report_generator_lambda.add_environment(
+            "ATHENA_SETUP_LAMBDA_NAME", self.athena_setup_lambda.function_name
+        )
+        
         # Grant report generator permission to invoke QuickSight Lambda
         self.quicksight_dashboard_lambda.grant_invoke(report_generator_role)
+        
+        # Grant report generator permission to invoke Athena setup Lambda
+        self.athena_setup_lambda.grant_invoke(report_generator_role)
+        
+        # Add data transformer Lambda name to aggregator environment
+        self.aggregator_lambda.add_environment(
+            "DATA_TRANSFORMER_LAMBDA_NAME", self.data_transformer_lambda.function_name
+        )
+        
+        # Grant aggregator permission to invoke data transformer
+        self.data_transformer_lambda.grant_invoke(aggregator_role)
         
         # Remediation Lambda for automatic security response
         self.remediation_lambda = lambda_python.PythonFunction(
@@ -266,6 +284,33 @@ class LambdaStack(Stack):
             log_retention=logs.RetentionDays.TWO_WEEKS,
             description="Sets up Athena tables and views for security findings analysis"
         )
+        
+        # Data Transformer Lambda
+        self.data_transformer_lambda = lambda_python.PythonFunction(
+            self, "DataTransformerLambda",
+            entry=os.path.join("..", "src", "lambdas", "data_transformer"),
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.lambda_handler",
+            index="handler.py",
+            role=data_transformer_role,
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            environment={
+                **common_env,
+                "ATHENA_DATABASE": "security_audit_findings"
+            },
+            timeout=Duration.minutes(5),
+            memory_size=1024,
+            layers=[shared_layer],
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+            description="Transforms agent findings to Athena-compatible format"
+        )
+        # Grant S3 permissions to invoke data transformer
+        results_bucket.grant_read(self.data_transformer_lambda)
+        
+        # Note: S3 event notifications should be configured after stack deployment
+        # to avoid circular dependencies. Alternatively, use EventBridge rules.
+        
         
         # SNS Handler Lambda
         self.sns_handler_lambda = lambda_.Function(

@@ -102,6 +102,9 @@ class AIReportGenerator:
         # Save report to S3
         report_urls = self._save_comprehensive_report(scan_id, report)
         
+        # Transform data for Athena compatibility
+        self._invoke_data_transformer(scan_id)
+        
         # Ensure Athena tables are set up
         self._invoke_athena_setup()
         
@@ -1367,6 +1370,29 @@ Format as JSON:
         except Exception as e:
             print(f"Error invoking QuickSight dashboard: {e}")
             return ''
+    
+    def _invoke_data_transformer(self, scan_id: str):
+        """Invoke data transformer Lambda to prepare data for Athena"""
+        try:
+            data_transformer_lambda = os.environ.get('DATA_TRANSFORMER_LAMBDA_NAME', 'DataTransformerLambda')
+            
+            response = lambda_client.invoke(
+                FunctionName=data_transformer_lambda,
+                InvocationType='RequestResponse',  # Synchronous - wait for completion
+                Payload=json.dumps({
+                    'scan_id': scan_id
+                })
+            )
+            
+            result = json.loads(response['Payload'].read())
+            if result.get('statusCode') == 200:
+                print(f"Data transformation successful: {result.get('findings_count')} findings processed")
+            else:
+                print(f"Data transformation warning: {result.get('error', 'Unknown error')}")
+                
+        except Exception as e:
+            print(f"Error invoking data transformer: {e}")
+            # Continue even if transformation fails
 
 
 def handler(event, context):

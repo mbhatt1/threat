@@ -771,3 +771,43 @@ class IAMStack(Stack):
                 f"{results_bucket.bucket_arn}/*"
             ]
         ))
+        
+        # Data Transformer Lambda Role
+        self.data_transformer_role = iam.Role(
+            self, "DataTransformerRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole")
+            ],
+            description="Role for Data Transformer Lambda function"
+        )
+        
+        # Grant Data Transformer permissions
+        scan_table.grant_read_write_data(self.data_transformer_role)
+        results_bucket.grant_read_write(self.data_transformer_role)
+        
+        # S3 permissions for reading agent outputs and writing Athena data
+        self.data_transformer_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:ListBucket"
+            ],
+            resources=[
+                results_bucket.bucket_arn,
+                f"{results_bucket.bucket_arn}/*"
+            ]
+        ))
+        
+        # DynamoDB permissions for scan metadata
+        self.data_transformer_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "dynamodb:GetItem",
+                "dynamodb:UpdateItem"
+            ],
+            resources=[
+                scan_table.table_arn
+            ]
+        ))

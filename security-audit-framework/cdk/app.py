@@ -61,6 +61,7 @@ lambda_stack = LambdaStack(
     remediation_lambda_role=iam_stack.remediation_lambda_role,
     ai_security_role=iam_stack.ai_security_role,
     athena_setup_role=iam_stack.athena_setup_role,
+    data_transformer_role=iam_stack.data_transformer_role,
     results_bucket=storage_stack.results_bucket,
     scan_table=storage_stack.scan_table,
     remediation_table=storage_stack.remediation_table,
@@ -169,7 +170,8 @@ monitoring_stack = MonitoringStack(
         lambda_stack.report_generator_lambda,
         lambda_stack.remediation_lambda,
         lambda_stack.quicksight_dashboard_lambda,
-        lambda_stack.athena_setup_lambda
+        lambda_stack.athena_setup_lambda,
+        lambda_stack.data_transformer_lambda
     ],
     state_machine=step_function_stack.state_machine,
     api=api_stack.api,
