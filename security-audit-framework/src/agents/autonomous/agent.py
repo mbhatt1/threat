@@ -355,7 +355,11 @@ class AutonomousAgent:
         task_context = message.context
         
         try:
-            # Fetch recent findings from DynamoDB
+            # Check if this is a direct tool creation request
+            if task_context.get('action') == 'create_dynamic_tool':
+                return self._handle_tool_creation_request(message)
+            
+            # Otherwise, fetch recent findings from DynamoDB
             findings = self._fetch_recent_findings()
             logger.info(f"Fetched {len(findings)} recent findings for analysis")
             
