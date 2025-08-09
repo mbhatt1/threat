@@ -22,6 +22,7 @@ A revolutionary, fully autonomous security auditing system powered by AWS Bedroc
 2. **Autonomous Dynamic Tool Creation Agent**
    - Creates new security patterns and rules based on ML clustering and AI analysis
    - Self-improving detection capabilities
+   - **Accepts tool creation requests from other agents** for on-demand security tool generation
 
 3. **Autonomous Code Analyzer**
    - Deep semantic code understanding, cross-file analysis, and architecture vulnerability assessment
