@@ -29,6 +29,7 @@ from ai_models.threat_intelligence import AISecurityIntelligence
 from ai_models.root_cause_analyzer import AIRootCauseAnalyzer
 from ai_models.pure_ai_detector import PureAIVulnerabilityDetector
 from ai_models.ai_security_sandbox import AISecuritySandbox
+from ai_models.security_test_generator import AISecurityTestGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class AISecurityOrchestrator:
         self.root_cause_analyzer = AIRootCauseAnalyzer()
         self.pure_ai_detector = PureAIVulnerabilityDetector()
         self.ai_sandbox = AISecuritySandbox()
+        self.test_generator = AISecurityTestGenerator()
         
         # DynamoDB tables
         self.scans_table = dynamodb.Table(
@@ -856,6 +858,149 @@ class AISecurityOrchestratorExtensions:
         except Exception as e:
             logger.error(f"Sandbox testing failed: {e}")
             return {'error': str(e)}
+    
+    async def generate_security_tests(self,
+                                    findings: List[Dict[str, Any]],
+                                    repository_path: str,
+                                    test_types: List[str] = None) -> Dict[str, Any]:
+        """
+        Generate comprehensive security tests for identified vulnerabilities
+        
+        Args:
+            findings: List of vulnerability findings
+            repository_path: Path to the repository
+            test_types: Types of tests to generate
+            
+        Returns:
+            Dict containing generated tests and metadata
+        """
+        try:
+            logger.info(f"Generating security tests for {len(findings)} findings")
+            
+            # Extract vulnerabilities from findings
+            vulnerabilities = []
+            for finding in findings:
+                vuln = {
+                    'type': finding.get('finding_type', 'unknown'),
+                    'severity': finding.get('severity', 'MEDIUM'),
+                    'description': finding.get('description', ''),
+                    'file_path': finding.get('file_path', ''),
+                    'line_number': finding.get('line_number', 0),
+                    'remediation': finding.get('remediation', '')
+                }
+                vulnerabilities.append(vuln)
+            
+            # Prepare code context
+            code_context = {
+                'repository': repository_path,
+                'language': self._detect_primary_language(repository_path),
+                'framework': self._detect_framework_from_files(repository_path),
+                'tech_stack': self._extract_technology_stack(repository_path),
+                'app_type': 'web application',  # Could be enhanced with detection
+                'deployment': 'cloud'
+            }
+            
+            # Generate tests
+            test_result = await self.test_generator.generate_tests(
+                vulnerabilities=vulnerabilities,
+                code_context=code_context,
+                test_types=test_types
+            )
+            
+            # Store test results
+            test_data = {
+                'scan_id': self._generate_scan_id(repository_path, 'main'),
+                'generated_at': test_result.generation_timestamp,
+                'test_cases': [
+                    {
+                        'test_id': tc.test_id,
+                        'test_name': tc.test_name,
+                        'test_type': tc.test_type,
+                        'vulnerability_type': tc.vulnerability_type,
+                        'test_code': tc.test_code,
+                        'severity': tc.severity,
+                        'confidence': tc.confidence
+                    }
+                    for tc in test_result.test_cases
+                ],
+                'penetration_scenarios': [
+                    {
+                        'scenario_id': ps.scenario_id,
+                        'scenario_name': ps.scenario_name,
+                        'attack_vector': ps.attack_vector,
+                        'target_vulnerability': ps.target_vulnerability,
+                        'attack_steps': ps.attack_steps,
+                        'risk_score': ps.risk_score
+                    }
+                    for ps in test_result.penetration_scenarios
+                ],
+                'test_suite_metadata': test_result.test_suite_metadata,
+                'coverage_analysis': test_result.coverage_analysis,
+                'ai_confidence': test_result.ai_confidence
+            }
+            
+            # Save to S3
+            s3_key = f"test-suites/{test_data['scan_id']}/security_tests.json"
+            s3.put_object(
+                Bucket=self.scan_bucket,
+                Key=s3_key,
+                Body=json.dumps(test_data, indent=2),
+                ContentType='application/json'
+            )
+            
+            return {
+                'test_suite_id': test_data['scan_id'],
+                'total_test_cases': len(test_result.test_cases),
+                'total_penetration_scenarios': len(test_result.penetration_scenarios),
+                'coverage_percentage': test_result.coverage_analysis['vulnerability_coverage']['coverage_percentage'],
+                'estimated_execution_time': test_result.test_suite_metadata['estimated_execution_time'],
+                'required_tools': test_result.test_suite_metadata['required_tools'],
+                's3_location': f"s3://{self.scan_bucket}/{s3_key}",
+                'test_distribution': test_result.coverage_analysis['test_distribution']
+            }
+            
+        except Exception as e:
+            logger.error(f"Test generation failed: {e}")
+            return {'error': str(e)}
+    
+    def _detect_primary_language(self, repository_path: str) -> str:
+        """Detect the primary programming language in the repository"""
+        language_counts = {}
+        
+        for root, _, files in os.walk(repository_path):
+            for file in files:
+                ext = Path(file).suffix.lower()
+                language = self._detect_language(os.path.join(root, file))
+                if language != 'unknown':
+                    language_counts[language] = language_counts.get(language, 0) + 1
+        
+        if language_counts:
+            return max(language_counts, key=language_counts.get)
+        return 'unknown'
+    
+    def _detect_framework_from_files(self, repository_path: str) -> str:
+        """Detect framework from configuration files"""
+        framework_indicators = {
+            'package.json': ['react', 'angular', 'vue', 'express', 'next'],
+            'requirements.txt': ['django', 'flask', 'fastapi'],
+            'pom.xml': ['spring'],
+            'Gemfile': ['rails'],
+            'go.mod': ['gin', 'echo', 'fiber']
+        }
+        
+        for config_file, frameworks in framework_indicators.items():
+            file_path = os.path.join(repository_path, config_file)
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, 'r') as f:
+                        content = f.read().lower()
+                        for framework in frameworks:
+                            if framework in content:
+                                return framework
+                except:
+                    continue
+                    
+        return 'unknown'
     
     def _extract_technology_stack(self, repository_path: str) -> List[str]:
         """Extract technology stack from repository"""

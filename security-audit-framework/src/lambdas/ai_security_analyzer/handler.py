@@ -20,6 +20,7 @@ from ai_models.threat_intelligence import AISecurityIntelligence
 from ai_models.root_cause_analyzer import AIRootCauseAnalyzer
 from ai_models.pure_ai_detector import PureAIVulnerabilityDetector
 from ai_models.ai_security_sandbox import AISecuritySandbox
+from ai_models.security_test_generator import AISecurityTestGenerator
 
 # Initialize components
 sql_detector = SQLInjectionDetector()
@@ -27,6 +28,7 @@ threat_intel = AISecurityIntelligence()
 root_cause = AIRootCauseAnalyzer()
 pure_ai = PureAIVulnerabilityDetector()
 sandbox = AISecuritySandbox()
+test_generator = AISecurityTestGenerator()
 
 
 def handler(event, context):
@@ -55,14 +57,16 @@ def handler(event, context):
             return handle_pure_ai_detection(payload)
         elif action == 'sandbox':
             return handle_sandbox_testing(payload)
+        elif action == 'test_generator':
+            return handle_test_generation(payload)
         else:
             return {
                 'statusCode': 400,
                 'body': json.dumps({
                     'error': f'Unknown action: {action}',
                     'available_actions': [
-                        'analyze_sql', 'threat_intel', 'root_cause', 
-                        'pure_ai', 'sandbox'
+                        'analyze_sql', 'threat_intel', 'root_cause',
+                        'pure_ai', 'sandbox', 'test_generator'
                     ]
                 })
             }
@@ -315,4 +319,67 @@ def handle_sandbox_testing(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
         
     finally:
+        loop.close()
+
+
+def handle_test_generation(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle AI security test generation"""
+    vulnerabilities = payload.get('vulnerabilities', [])
+    code_context = payload.get('code_context', {})
+    test_types = payload.get('test_types', ['unit', 'integration', 'penetration', 'fuzzing'])
+    
+    if not vulnerabilities:
+        return {
+            'statusCode': 400,
+            'body': json.dumps({'error': 'Vulnerabilities list is required'})
+        }
+    
+    # Create event loop for async operations
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        result = loop.run_until_complete(
+            test_generator.generate_tests(vulnerabilities, code_context, test_types)
+        )
+        
+        response_data = {
+            'test_suite_id': result.test_suite_metadata.get('suite_id'),
+            'total_test_cases': len(result.test_cases),
+            'total_penetration_scenarios': len(result.penetration_scenarios),
+            'test_distribution': result.coverage_analysis.get('test_distribution', {}),
+            'coverage_percentage': result.coverage_analysis['vulnerability_coverage']['coverage_percentage'],
+            'estimated_execution_time': result.test_suite_metadata.get('estimated_execution_time'),
+            'required_tools': result.test_suite_metadata.get('required_tools', []),
+            'ai_confidence': result.ai_confidence,
+            'test_cases': [
+                {
+                    'test_id': tc.test_id,
+                    'test_name': tc.test_name,
+                    'test_type': tc.test_type,
+                    'vulnerability_type': tc.vulnerability_type,
+                    'severity': tc.severity,
+                    'confidence': tc.confidence
+                }
+                for tc in result.test_cases[:10]  # Return first 10 for response size
+            ],
+            'penetration_scenarios': [
+                {
+                    'scenario_id': ps.scenario_id,
+                    'scenario_name': ps.scenario_name,
+                    'attack_vector': ps.attack_vector,
+                    'target_vulnerability': ps.target_vulnerability,
+                    'risk_score': ps.risk_score
+                }
+                for ps in result.penetration_scenarios[:5]  # Return first 5
+            ]
+        }
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps(response_data)
+        }
+        
+    finally:
+        loop.close()
         loop.close()

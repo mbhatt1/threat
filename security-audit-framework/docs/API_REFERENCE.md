@@ -919,6 +919,103 @@ POST /v1/ai-security/sandbox
     "analysis_method": "Static analysis + simulated execution paths"
   }
 }
+
+### 16. AI Security Test Generator
+
+Generates comprehensive security test cases and penetration testing scenarios using AI.
+
+```http
+POST /v1/ai-security/test-generator
+```
+
+#### Request Body
+
+```json
+{
+  "action": "test_generator",
+  "payload": {
+    "vulnerabilities": [
+      {
+        "type": "SQL_INJECTION",
+        "severity": "CRITICAL",
+        "description": "SQL injection in user authentication",
+        "file_path": "src/auth/login.py",
+        "line_number": 45,
+        "remediation": "Use parameterized queries"
+      }
+    ],
+    "code_context": {
+      "repository": "my-web-app",
+      "language": "python",
+      "framework": "django",
+      "tech_stack": ["python", "django", "postgresql"]
+    },
+    "test_types": ["unit", "integration", "penetration", "fuzzing"]
+  }
+}
+```
+
+#### Response
+
+```json
+{
+  "test_suite_id": "test-suite-a1b2c3",
+  "total_test_cases": 25,
+  "total_penetration_scenarios": 5,
+  "test_distribution": {
+    "unit_tests": 10,
+    "integration_tests": 8,
+    "fuzzing_tests": 7,
+    "penetration_tests": 5
+  },
+  "coverage_percentage": 95.0,
+  "estimated_execution_time": "2.5 hours",
+  "required_tools": [
+    "pytest",
+    "unittest",
+    "Burp Suite",
+    "OWASP ZAP",
+    "AFL++",
+    "libFuzzer"
+  ],
+  "ai_confidence": 0.92,
+  "test_cases": [
+    {
+      "test_id": "test-123abc",
+      "test_name": "test_sql_injection_authentication_negative",
+      "test_type": "unit",
+      "vulnerability_type": "SQL_INJECTION",
+      "severity": "CRITICAL",
+      "confidence": 0.95
+    }
+  ],
+  "penetration_scenarios": [
+    {
+      "scenario_id": "pen-test-xyz",
+      "scenario_name": "SQL Injection Authentication Bypass",
+      "attack_vector": "Login form manipulation",
+      "target_vulnerability": "SQL_INJECTION",
+      "risk_score": 9.5
+    }
+  ]
+}
+```
+
+#### Test Types
+
+- **unit**: Unit tests for specific vulnerabilities
+- **integration**: Integration tests for vulnerability chains
+- **penetration**: Penetration testing scenarios
+- **fuzzing**: Fuzzing tests for input validation
+
+#### Features
+
+- AI-generated test code in target language
+- Comprehensive penetration testing scenarios
+- Fuzzing patterns for input validation
+- Test coverage analysis
+- Execution time estimation
+- Required tools identification
 ```
 
 ## Webhook Events

@@ -68,41 +68,255 @@ A revolutionary, fully autonomous security auditing system powered by AWS Bedroc
 
 ## 🏗️ Architecture
 
+### System Architecture
+
+```mermaid
+graph TB
+    %% External Triggers
+    API[API Gateway] --> |Scan Request| SNS[SNS Topic]
+    GitHub[GitHub Actions] --> |CI/CD Trigger| SNS
+    Jenkins[Jenkins Plugin] --> |Build Trigger| SNS
+    
+    %% CEO Agent Decision
+    SNS --> CEO[CEO Agent Lambda<br/>AI-Powered Orchestration]
+    CEO --> |Execution Plan| StepFn[Step Functions]
+    
+    %% Parallel Agent Execution
+    StepFn --> ECS[ECS Fargate Cluster]
+    
+    ECS --> Agent1[Bedrock Unified<br/>Security Scanner]
+    ECS --> Agent2[Autonomous Code<br/>Analyzer]
+    ECS --> Agent3[Threat Intelligence<br/>Agent]
+    ECS --> Agent4[Infrastructure<br/>Security Agent]
+    ECS --> Agent5[Supply Chain<br/>Security Agent]
+    ECS --> Agent6[Dynamic Tool<br/>Creation Agent]
+    
+    %% AI Components
+    Agent1 --> Bedrock[AWS Bedrock<br/>Claude 3 Models]
+    Agent2 --> Bedrock
+    Agent3 --> Bedrock
+    Agent4 --> Bedrock
+    Agent5 --> Bedrock
+    Agent6 --> Bedrock
+    
+    %% Results Processing
+    Agent1 --> |Findings| DynamoDB[(DynamoDB<br/>Findings Store)]
+    Agent2 --> |Findings| DynamoDB
+    Agent3 --> |Findings| DynamoDB
+    Agent4 --> |Findings| DynamoDB
+    Agent5 --> |Findings| DynamoDB
+    Agent6 --> |Findings| DynamoDB
+    
+    %% Aggregation and Reporting
+    DynamoDB --> Aggregator[AI Aggregator Lambda<br/>Attack Chain Discovery]
+    Aggregator --> Reporter[AI Report Generator<br/>Lambda]
+    
+    %% AI Security Analyzer
+    Aggregator --> AIAnalyzer[AI Security Analyzer<br/>Lambda]
+    AIAnalyzer --> |Advanced Analysis| S3[(S3 Reports)]
+    
+    %% Output
+    Reporter --> S3
+    S3 --> CloudFront[CloudFront<br/>Report Distribution]
+    
+    %% Monitoring
+    CloudWatch[CloudWatch] -.->|Monitors| CEO
+    CloudWatch -.->|Monitors| ECS
+    CloudWatch -.->|Monitors| Aggregator
+    
+    %% HASHIRU Cost Optimization
+    HASHIRU[HASHIRU Framework] -.->|Cost Control| ECS
+    HASHIRU -.->|Agent Performance| DynamoDB
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                          SNS Trigger                              │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        CEO Agent (AI)                             │
-│              Determines optimal scanning strategy                 │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   Parallel Execution (ECS)                        │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌────────────┐│
-│  │  Bedrock    │ │ Autonomous  │ │    Code     │ │   Threat   ││
-│  │  Unified    │ │   Dynamic   │ │  Analyzer   │ │   Intel    ││
-│  └─────────────┘ └─────────────┘ └─────────────┘ └────────────┘│
-│  ┌─────────────┐ ┌─────────────┐                                │
-│  │    Infra    │ │Supply Chain │                                │
-│  │  Security   │ │  Security   │                                │
-│  └─────────────┘ └─────────────┘                                │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    AI Aggregator (Lambda)                         │
-│         Correlates findings, discovers attack chains              │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  AI Report Generator (Lambda)                     │
-│          Creates comprehensive security reports                   │
-└─────────────────────────────────────────────────────────────────┘
+
+### AI Components Flow
+
+```mermaid
+graph LR
+    subgraph "AI Security Components"
+        SQL[SQL Injection<br/>Detector]
+        ThreatIntel[AI Security<br/>Intelligence]
+        RootCause[Root Cause<br/>Analyzer]
+        PureAI[Pure AI<br/>Detector]
+        Sandbox[AI Security<br/>Sandbox]
+        TestGen[AI Test<br/>Generator]
+    end
+    
+    subgraph "AI Orchestrator"
+        Orchestrator[AI Security<br/>Orchestrator]
+    end
+    
+    subgraph "AWS Services"
+        Bedrock[AWS Bedrock<br/>Claude 3]
+        DDB[(DynamoDB)]
+        S3[(S3)]
+    end
+    
+    %% Component Interactions
+    Orchestrator --> SQL
+    Orchestrator --> ThreatIntel
+    Orchestrator --> RootCause
+    Orchestrator --> PureAI
+    Orchestrator --> Sandbox
+    Orchestrator --> TestGen
+    
+    SQL --> Bedrock
+    ThreatIntel --> Bedrock
+    RootCause --> Bedrock
+    PureAI --> Bedrock
+    Sandbox --> Bedrock
+    TestGen --> Bedrock
+    
+    %% Data Storage
+    SQL --> DDB
+    ThreatIntel --> DDB
+    RootCause --> DDB
+    PureAI --> S3
+    Sandbox --> S3
+    TestGen --> S3
+```
+
+### Security Scanning Workflow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant API
+    participant CEO
+    participant StepFn
+    participant Agents
+    participant AI
+    participant Aggregator
+    participant Report
+    
+    User->>API: POST /v1/scans
+    API->>CEO: Trigger scan via SNS
+    CEO->>AI: Analyze repository context
+    AI-->>CEO: Optimal scan strategy
+    CEO->>StepFn: Execute scan plan
+    
+    par Parallel Agent Execution
+        StepFn->>Agents: Bedrock Unified Scanner
+        StepFn->>Agents: Code Analyzer
+        StepFn->>Agents: Threat Intelligence
+        StepFn->>Agents: Infrastructure Security
+        StepFn->>Agents: Supply Chain Security
+    end
+    
+    Agents->>AI: Analyze with Claude 3
+    AI-->>Agents: Security findings
+    Agents->>DynamoDB: Store findings
+    
+    StepFn->>Aggregator: Process all findings
+    Aggregator->>AI: Correlate & discover attack chains
+    AI-->>Aggregator: Attack scenarios
+    
+    Aggregator->>Report: Generate report
+    Report->>S3: Store final report
+    Report-->>User: Scan complete notification
+```
+
+### Data Flow Architecture
+
+```mermaid
+graph TD
+    subgraph "Input Sources"
+        Code[Source Code]
+        Config[Config Files]
+        Deps[Dependencies]
+        Infra[Infrastructure]
+    end
+    
+    subgraph "AI Analysis Layer"
+        Scanner[AI Security Scanner]
+        Analyzer[AI Code Analyzer]
+        Intel[AI Threat Intel]
+        Supply[AI Supply Chain]
+    end
+    
+    subgraph "Advanced AI Features"
+        SQL[SQL Injection AI]
+        Pure[Pure AI Detection]
+        Sandbox[AI Sandbox Testing]
+        RootCause[Root Cause AI]
+        TestGen[Test Generator AI]
+    end
+    
+    subgraph "Data Storage"
+        Findings[(Findings DB)]
+        Learning[(Learning DB)]
+        Reports[(Reports S3)]
+    end
+    
+    subgraph "Intelligence Layer"
+        Correlator[AI Correlator]
+        Predictor[Attack Predictor]
+        Prioritizer[Risk Prioritizer]
+    end
+    
+    %% Flow connections
+    Code --> Scanner
+    Config --> Scanner
+    Deps --> Supply
+    Infra --> Analyzer
+    
+    Scanner --> Findings
+    Analyzer --> Findings
+    Intel --> Findings
+    Supply --> Findings
+    
+    Findings --> SQL
+    Findings --> Pure
+    Findings --> Sandbox
+    Findings --> RootCause
+    Findings --> TestGen
+    
+    SQL --> Learning
+    Pure --> Learning
+    Sandbox --> Reports
+    RootCause --> Reports
+    TestGen --> Reports
+    
+    Findings --> Correlator
+    Learning --> Correlator
+    Correlator --> Predictor
+    Predictor --> Prioritizer
+    Prioritizer --> Reports
+```
+
+### HASHIRU Agent Performance Management
+
+```mermaid
+stateDiagram-v2
+    [*] --> Hired: New Agent Deployed
+    
+    Hired --> Performing: Good Metrics
+    Hired --> Underperforming: Poor Metrics
+    
+    Performing --> Promoted: Exceptional Performance
+    Performing --> Retained: Stable Performance
+    Performing --> Warned: Declining Performance
+    
+    Underperforming --> Warned: First Strike
+    Warned --> Probation: Second Strike
+    Probation --> Fired: Third Strike
+    Probation --> Retained: Improved
+    
+    Promoted --> [*]: Elite Status
+    Retained --> Performing: Continue Monitoring
+    Fired --> [*]: Decommissioned
+    
+    note right of Promoted
+        Cost reduction > 30%
+        Accuracy > 95%
+        Speed improvement > 40%
+    end note
+    
+    note right of Fired
+        Persistent poor performance
+        High false positive rate
+        Excessive resource usage
+    end note
 ```
 
 ## 🚀 Quick Start

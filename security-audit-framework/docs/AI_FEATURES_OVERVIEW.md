@@ -138,6 +138,23 @@ The Security Audit Framework has been completely reimagined as an AI-first syste
   - All simulation happens within Bedrock model context
 - **Limitations**: Cannot test actual runtime behavior, only theoretical exploitation
 
+### 11. AI Security Test Generator (`security_test_generator.py`)
+- **Purpose**: Generate comprehensive security test cases and penetration testing scenarios using AI
+- **Implementation**: Multi-mode test generation using Bedrock Claude models
+- **API Endpoint**: `POST /ai-security/test-generator`
+- **Technical Details**:
+  - Generates unit, integration, fuzzing, and penetration tests
+  - Language-specific test code generation
+  - Penetration scenario creation with attack steps
+  - Test coverage analysis and recommendations
+  - Execution time estimation and tool identification
+- **Test Types**:
+  - Unit tests for individual vulnerabilities
+  - Integration tests for vulnerability chains
+  - Fuzzing tests for input validation
+  - Penetration testing scenarios with detailed attack steps
+- **Output**: Complete test suite with code, scenarios, coverage analysis, and required tools
+
 ## AI-Powered CLI
 
 The CLI has been completely revamped with AI features:
