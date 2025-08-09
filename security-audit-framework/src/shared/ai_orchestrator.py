@@ -690,6 +690,83 @@ Format as JSON:
             )
         except Exception as e:
             logger.error(f"Failed to update scan status: {e}")
+    
+    async def analyze(self, content: str, context: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+        """
+        Perform AI analysis on content with given context and prompt
+        
+        Args:
+            content: The content to analyze (code, configuration, etc.)
+            context: Additional context for the analysis
+            prompt: The prompt to send to the AI model
+        
+        Returns:
+            Dict containing the AI analysis results
+        """
+        try:
+            # Prepare the full prompt with context
+            full_prompt = f"""Context: {json.dumps(context, indent=2)}
+
+Content to analyze:
+{content}
+
+{prompt}
+
+Provide your analysis in JSON format."""
+
+            # Call Bedrock for AI analysis
+            response = bedrock.invoke_model(
+                modelId=self.model_id,
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4000,
+                    "messages": [{
+                        "role": "user",
+                        "content": full_prompt
+                    }],
+                    "temperature": 0.1
+                })
+            )
+            
+            response_body = json.loads(response['body'].read())
+            ai_response_text = response_body['content'][0]['text']
+            
+            # Try to parse as JSON, fallback to structured response
+            try:
+                result = json.loads(ai_response_text)
+            except json.JSONDecodeError:
+                # If not valid JSON, create structured response
+                result = {
+                    'analysis': ai_response_text,
+                    'findings': [],
+                    'risk_score': 0.5,
+                    'confidence': 0.8
+                }
+            
+            # Ensure required fields based on context
+            if context.get('task') == 'code_file_analysis':
+                result.setdefault('is_code_file', True)
+                result.setdefault('language', 'unknown')
+                result.setdefault('risk_score', 0.5)
+                result.setdefault('risk_factors', [])
+                result.setdefault('api_endpoints', [])
+                result.setdefault('database_operations', [])
+                result.setdefault('line_count', 0)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"AI analysis failed: {e}")
+            # Return default response based on context
+            if context.get('task') == 'code_file_analysis':
+                return {
+                    'is_code_file': False,
+                    'error': str(e)
+                }
+            return {
+                'error': str(e),
+                'analysis': 'Failed to perform AI analysis'
+            }
 
 
 # Async wrapper for CLI integration

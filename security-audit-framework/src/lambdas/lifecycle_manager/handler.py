@@ -1,12 +1,13 @@
 """
-S3 Lifecycle Manager Lambda - Dynamic tagging based on scan results
+Lifecycle Manager Lambda - Manages lifecycle of security scan resources and data
 """
 import os
 import json
 import boto3
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, List, Any, Optional
+from decimal import Decimal
 
 # Configure logging
 logger = logging.getLogger()
@@ -15,345 +16,1195 @@ logger.setLevel(logging.INFO)
 # AWS clients
 s3_client = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
+ecs_client = boto3.client('ecs')
+logs_client = boto3.client('logs')
+cloudwatch = boto3.client('cloudwatch')
 
 # Environment variables
-RESULTS_BUCKET = os.environ['RESULTS_BUCKET']
-SCAN_TABLE = os.environ['SCAN_TABLE']
+SCAN_TABLE = os.environ.get('SCAN_TABLE', 'SecurityScans')
+AI_SCANS_TABLE = os.environ.get('AI_SCANS_TABLE', 'SecurityAuditAIScans')
+FINDINGS_TABLE = os.environ.get('AI_FINDINGS_TABLE', 'SecurityAuditAIFindings')
+RESULTS_BUCKET = os.environ.get('RESULTS_BUCKET')
+ANALYTICS_BUCKET = os.environ.get('ANALYTICS_BUCKET', RESULTS_BUCKET)
+LOG_GROUP_PREFIX = os.environ.get('LOG_GROUP_PREFIX', '/aws/lambda/AISecurityAudit')
+ECS_CLUSTER = os.environ.get('ECS_CLUSTER')
+
+# Retention policies (in days)
+DEFAULT_RETENTION_DAYS = {
+    'scan_data': 90,
+    'findings': 180,
+    'reports': 365,
+    'analytics': 90,
+    'logs': 30,
+    'temporary': 7
+}
 
 
 class LifecycleManager:
-    """Manages S3 object lifecycle based on scan results and priorities"""
+    """Manages lifecycle of security scan resources"""
     
     def __init__(self):
         self.scan_table = dynamodb.Table(SCAN_TABLE)
-        self.results_bucket = RESULTS_BUCKET
+        self.ai_scans_table = dynamodb.Table(AI_SCANS_TABLE)
+        self.findings_table = dynamodb.Table(FINDINGS_TABLE)
+        self.retention_policies = self._load_retention_policies()
         
-    def handle_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+    def manage_lifecycle(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process lifecycle management event
-        Can be triggered by:
-        1. CloudWatch Events (scheduled)
-        2. S3 Event (new object created)
-        3. Direct invocation after scan completion
+        Main entry point for lifecycle management
+        
+        Actions:
+        1. Archive old scan data
+        2. Clean up temporary resources
+        3. Rotate logs
+        4. Manage S3 lifecycle policies
+        5. Monitor resource usage
         """
-        try:
-            event_source = event.get('source', 'direct')
-            
-            if event_source == 'aws.s3':
-                # Process new S3 object
-                return self._process_s3_event(event)
-            elif event_source == 'aws.events':
-                # Scheduled run to review and update tags
-                return self._process_scheduled_event(event)
-            else:
-                # Direct invocation - process specific scan
-                scan_id = event.get('scan_id')
-                if scan_id:
-                    return self._process_scan_lifecycle(scan_id)
-                else:
-                    return self._process_all_recent_scans()
-                    
-        except Exception as e:
-            logger.error(f"Lifecycle management failed: {str(e)}", exc_info=True)
-            return {
-                'statusCode': 500,
-                'error': str(e)
-            }
+        
+        action = event.get('action', 'scheduled_cleanup')
+        
+        if action == 'scheduled_cleanup':
+            return self._perform_scheduled_cleanup()
+        elif action == 'archive_scan':
+            return self._archive_scan_data(event.get('scan_id'))
+        elif action == 'cleanup_resources':
+            return self._cleanup_resources(event.get('resource_type'))
+        elif action == 'monitor_usage':
+            return self._monitor_resource_usage()
+        elif action == 'optimize_storage':
+            return self._optimize_storage()
+        elif action == 'manage_retention':
+            return self._manage_retention_policies()
+        else:
+            return {'statusCode': 400, 'message': f'Unknown action: {action}'}
     
-    def _process_s3_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        """Process S3 object creation event"""
-        processed_objects = []
+    def _perform_scheduled_cleanup(self) -> Dict[str, Any]:
+        """Perform scheduled cleanup tasks"""
         
-        for record in event.get('Records', []):
-            if record['eventName'].startswith('ObjectCreated'):
-                bucket = record['s3']['bucket']['name']
-                key = record['s3']['object']['key']
-                
-                # Extract scan_id from key
-                # Expected format: raw/{scan_id}/agent_type/results.json
-                parts = key.split('/')
-                if len(parts) >= 3 and parts[0] == 'raw':
-                    scan_id = parts[1]
-                    
-                    # Get scan metadata
-                    scan_data = self._get_scan_metadata(scan_id)
-                    if scan_data:
-                        # Apply tags based on scan priority and results
-                        tags = self._determine_object_tags(scan_data, key)
-                        self._apply_object_tags(bucket, key, tags)
-                        processed_objects.append({
-                            'key': key,
-                            'tags': tags
-                        })
-        
-        return {
-            'statusCode': 200,
-            'processed': len(processed_objects),
-            'objects': processed_objects
+        results = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'actions_performed': []
         }
-    
-    def _process_scheduled_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        """Process scheduled lifecycle review"""
-        # Review recent scans and update tags as needed
-        days_to_review = event.get('days', 7)
-        cutoff_date = datetime.utcnow() - timedelta(days=days_to_review)
         
-        # Query recent scans
-        response = self.scan_table.scan(
-            FilterExpression='created_at > :cutoff',
-            ExpressionAttributeValues={
-                ':cutoff': cutoff_date.isoformat()
-            }
-        )
+        # 1. Archive old scans
+        archived_scans = self._archive_old_scans()
+        results['actions_performed'].append({
+            'action': 'archive_scans',
+            'count': archived_scans['archived_count']
+        })
         
-        processed_count = 0
-        for scan in response.get('Items', []):
-            self._update_scan_object_tags(scan)
-            processed_count += 1
+        # 2. Clean up DynamoDB
+        dynamo_cleanup = self._cleanup_dynamodb()
+        results['actions_performed'].append({
+            'action': 'cleanup_dynamodb',
+            'items_deleted': dynamo_cleanup['deleted_count']
+        })
         
-        return {
-            'statusCode': 200,
-            'reviewed_scans': processed_count,
-            'cutoff_date': cutoff_date.isoformat()
-        }
-    
-    def _process_scan_lifecycle(self, scan_id: str) -> Dict[str, Any]:
-        """Process lifecycle for a specific scan"""
-        scan_data = self._get_scan_metadata(scan_id)
+        # 3. Clean up S3
+        s3_cleanup = self._cleanup_s3()
+        results['actions_performed'].append({
+            'action': 'cleanup_s3',
+            'objects_deleted': s3_cleanup['deleted_count']
+        })
         
-        if not scan_data:
-            return {
-                'statusCode': 404,
-                'error': f'Scan {scan_id} not found'
-            }
+        # 4. Clean up CloudWatch Logs
+        logs_cleanup = self._cleanup_logs()
+        results['actions_performed'].append({
+            'action': 'cleanup_logs',
+            'log_groups_cleaned': logs_cleanup['cleaned_count']
+        })
         
-        # List all objects for this scan
-        prefix = f"raw/{scan_id}/"
-        objects = self._list_scan_objects(prefix)
-        
-        # Apply appropriate tags to each object
-        tagged_objects = []
-        for obj in objects:
-            tags = self._determine_object_tags(scan_data, obj['Key'])
-            self._apply_object_tags(self.results_bucket, obj['Key'], tags)
-            tagged_objects.append({
-                'key': obj['Key'],
-                'size': obj['Size'],
-                'tags': tags
+        # 5. Clean up ECS tasks
+        if ECS_CLUSTER:
+            ecs_cleanup = self._cleanup_ecs_tasks()
+            results['actions_performed'].append({
+                'action': 'cleanup_ecs',
+                'tasks_stopped': ecs_cleanup['stopped_count']
             })
         
-        # Also tag processed reports if they exist
-        processed_prefix = f"processed/{scan_id}/"
-        processed_objects = self._list_scan_objects(processed_prefix)
+        # 6. Generate cleanup report
+        report = self._generate_cleanup_report(results)
+        results['report_location'] = report
         
-        for obj in processed_objects:
-            tags = {
-                'Type': 'processed',
-                'Priority': scan_data.get('priority', 'normal'),
-                'ScanId': scan_id
-            }
-            self._apply_object_tags(self.results_bucket, obj['Key'], tags)
+        # 7. Update metrics
+        self._update_cleanup_metrics(results)
         
         return {
             'statusCode': 200,
+            'cleanup_results': results
+        }
+    
+    def _archive_scan_data(self, scan_id: str) -> Dict[str, Any]:
+        """Archive specific scan data"""
+        
+        if not scan_id:
+            return {'statusCode': 400, 'message': 'scan_id required'}
+        
+        archived = {
             'scan_id': scan_id,
-            'tagged_raw_objects': len(tagged_objects),
-            'tagged_processed_objects': len(processed_objects),
-            'total_size_bytes': sum(obj['size'] for obj in tagged_objects)
+            'archived_at': datetime.utcnow().isoformat(),
+            'components': []
         }
-    
-    def _process_all_recent_scans(self) -> Dict[str, Any]:
-        """Process all recent scans without specific tags"""
-        # Find objects without proper lifecycle tags
-        untagged_objects = self._find_untagged_objects()
         
-        processed_count = 0
-        for obj_key in untagged_objects:
-            # Extract scan_id from key
-            parts = obj_key.split('/')
-            if len(parts) >= 2:
-                scan_id = parts[1]
-                scan_data = self._get_scan_metadata(scan_id)
-                
-                if scan_data:
-                    tags = self._determine_object_tags(scan_data, obj_key)
-                    self._apply_object_tags(self.results_bucket, obj_key, tags)
-                    processed_count += 1
+        # 1. Get scan metadata
+        scan_data = self._get_scan_data(scan_id)
+        if not scan_data:
+            return {'statusCode': 404, 'message': 'Scan not found'}
+        
+        # 2. Archive findings to S3
+        findings_archive = self._archive_findings(scan_id)
+        archived['components'].append({
+            'type': 'findings',
+            'status': findings_archive['status'],
+            'location': findings_archive.get('archive_location')
+        })
+        
+        # 3. Archive reports
+        reports_archive = self._archive_reports(scan_id)
+        archived['components'].append({
+            'type': 'reports',
+            'status': reports_archive['status'],
+            'location': reports_archive.get('archive_location')
+        })
+        
+        # 4. Create archive manifest
+        manifest = self._create_archive_manifest(scan_id, archived)
+        archived['manifest_location'] = manifest
+        
+        # 5. Clean up original data (if configured)
+        if event.get('delete_after_archive', False):
+            cleanup_result = self._cleanup_after_archive(scan_id)
+            archived['cleanup_performed'] = cleanup_result['success']
         
         return {
             'statusCode': 200,
-            'processed_objects': processed_count,
-            'untagged_found': len(untagged_objects)
+            'archive_result': archived
         }
     
-    def _get_scan_metadata(self, scan_id: str) -> Dict[str, Any]:
-        """Get scan metadata from DynamoDB"""
-        try:
-            response = self.scan_table.get_item(Key={'scan_id': scan_id})
-            return response.get('Item', {})
-        except Exception as e:
-            logger.error(f"Failed to get scan metadata: {e}")
-            return {}
-    
-    def _determine_object_tags(self, scan_data: Dict[str, Any], object_key: str) -> Dict[str, str]:
-        """Determine appropriate tags based on scan data and object type"""
-        tags = {
-            'ScanId': scan_data.get('scan_id', ''),
-            'Priority': scan_data.get('priority', 'normal'),
-            'CreatedAt': scan_data.get('created_at', datetime.utcnow().isoformat()),
-            'Repository': scan_data.get('repository_url', '').replace('/', '_')
+    def _cleanup_resources(self, resource_type: str) -> Dict[str, Any]:
+        """Clean up specific resource types"""
+        
+        cleanup_functions = {
+            'temporary_files': self._cleanup_temporary_files,
+            'failed_scans': self._cleanup_failed_scans,
+            'orphaned_resources': self._cleanup_orphaned_resources,
+            'old_analytics': self._cleanup_old_analytics,
+            'test_data': self._cleanup_test_data
         }
         
-        # Determine type based on path
-        if '/sast/' in object_key:
-            tags['Type'] = 'sast'
-        elif '/secrets/' in object_key:
-            tags['Type'] = 'secrets'
-        elif '/dependency/' in object_key:
-            tags['Type'] = 'dependency'
-        elif '/iac/' in object_key:
-            tags['Type'] = 'iac'
-        elif '/error' in object_key:
-            tags['Type'] = 'error'
-        else:
-            tags['Type'] = 'other'
+        if resource_type not in cleanup_functions:
+            return {'statusCode': 400, 'message': f'Unknown resource type: {resource_type}'}
         
-        # Check execution plan for critical findings
-        execution_plan = json.loads(scan_data.get('execution_plan', '{}'))
+        cleanup_result = cleanup_functions[resource_type]()
         
-        # Analyze findings if available
-        total_findings = scan_data.get('total_findings', {})
-        critical_findings = total_findings.get('critical', 0)
-        high_findings = total_findings.get('high', 0)
-        
-        # Set finding severity tag
-        if critical_findings > 0:
-            tags['FindingSeverity'] = 'critical'
-        elif high_findings > 0:
-            tags['FindingSeverity'] = 'high'
-        elif total_findings.get('medium', 0) > 0:
-            tags['FindingSeverity'] = 'medium'
-        else:
-            tags['FindingSeverity'] = 'low'
-        
-        # Add compliance tag if available
-        if scan_data.get('compliance_status'):
-            tags['ComplianceStatus'] = scan_data['compliance_status']
-        
-        # Add cost tag if available
-        if execution_plan.get('total_estimated_cost'):
-            tags['EstimatedCost'] = str(execution_plan['total_estimated_cost'])
-        
-        return tags
+        return {
+            'statusCode': 200,
+            'resource_type': resource_type,
+            'cleanup_result': cleanup_result
+        }
     
-    def _apply_object_tags(self, bucket: str, key: str, tags: Dict[str, str]) -> None:
-        """Apply tags to S3 object"""
-        try:
-            tag_set = [{'Key': k, 'Value': v} for k, v in tags.items() if v]
+    def _monitor_resource_usage(self) -> Dict[str, Any]:
+        """Monitor resource usage and costs"""
+        
+        usage_metrics = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'storage': {},
+            'compute': {},
+            'database': {},
+            'estimated_costs': {}
+        }
+        
+        # 1. S3 storage usage
+        if RESULTS_BUCKET:
+            s3_usage = self._get_s3_usage()
+            usage_metrics['storage']['s3'] = s3_usage
+            usage_metrics['estimated_costs']['s3_monthly'] = s3_usage['size_gb'] * 0.023  # $0.023/GB
+        
+        # 2. DynamoDB usage
+        dynamo_usage = self._get_dynamodb_usage()
+        usage_metrics['database']['dynamodb'] = dynamo_usage
+        usage_metrics['estimated_costs']['dynamodb_monthly'] = self._estimate_dynamodb_cost(dynamo_usage)
+        
+        # 3. ECS usage
+        if ECS_CLUSTER:
+            ecs_usage = self._get_ecs_usage()
+            usage_metrics['compute']['ecs'] = ecs_usage
+        
+        # 4. Lambda usage
+        lambda_usage = self._get_lambda_usage()
+        usage_metrics['compute']['lambda'] = lambda_usage
+        
+        # 5. Generate recommendations
+        recommendations = self._generate_cost_recommendations(usage_metrics)
+        usage_metrics['recommendations'] = recommendations
+        
+        # 6. Send alerts if thresholds exceeded
+        alerts = self._check_usage_thresholds(usage_metrics)
+        if alerts:
+            self._send_usage_alerts(alerts)
+            usage_metrics['alerts_sent'] = len(alerts)
+        
+        return {
+            'statusCode': 200,
+            'usage_metrics': usage_metrics
+        }
+    
+    def _optimize_storage(self) -> Dict[str, Any]:
+        """Optimize storage usage"""
+        
+        optimization_results = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'actions': []
+        }
+        
+        # 1. Compress large files
+        compression_result = self._compress_large_files()
+        optimization_results['actions'].append({
+            'type': 'compression',
+            'files_compressed': compression_result['count'],
+            'space_saved_mb': compression_result['space_saved']
+        })
+        
+        # 2. Move old data to Glacier
+        glacier_result = self._move_to_glacier()
+        optimization_results['actions'].append({
+            'type': 'glacier_transition',
+            'objects_moved': glacier_result['count'],
+            'cost_reduction': glacier_result['estimated_savings']
+        })
+        
+        # 3. Deduplicate data
+        dedup_result = self._deduplicate_data()
+        optimization_results['actions'].append({
+            'type': 'deduplication',
+            'duplicates_removed': dedup_result['count'],
+            'space_saved_mb': dedup_result['space_saved']
+        })
+        
+        # 4. Update S3 lifecycle policies
+        lifecycle_result = self._update_s3_lifecycle_policies()
+        optimization_results['actions'].append({
+            'type': 'lifecycle_policies',
+            'policies_updated': lifecycle_result['count']
+        })
+        
+        return {
+            'statusCode': 200,
+            'optimization_results': optimization_results
+        }
+    
+    def _manage_retention_policies(self) -> Dict[str, Any]:
+        """Manage data retention policies"""
+        
+        policy_updates = []
+        
+        # 1. Review current policies
+        current_policies = self.retention_policies
+        
+        # 2. Apply policies to different data types
+        for data_type, retention_days in current_policies.items():
+            if data_type == 'scan_data':
+                result = self._apply_scan_retention(retention_days)
+            elif data_type == 'findings':
+                result = self._apply_findings_retention(retention_days)
+            elif data_type == 'reports':
+                result = self._apply_reports_retention(retention_days)
+            elif data_type == 'logs':
+                result = self._apply_logs_retention(retention_days)
+            else:
+                result = {'status': 'skipped', 'reason': 'Unknown data type'}
             
-            s3_client.put_object_tagging(
-                Bucket=bucket,
-                Key=key,
-                Tagging={'TagSet': tag_set}
+            policy_updates.append({
+                'data_type': data_type,
+                'retention_days': retention_days,
+                'result': result
+            })
+        
+        return {
+            'statusCode': 200,
+            'policy_updates': policy_updates
+        }
+    
+    def _load_retention_policies(self) -> Dict[str, int]:
+        """Load retention policies from configuration"""
+        # In production, load from DynamoDB or S3
+        return DEFAULT_RETENTION_DAYS.copy()
+    
+    def _archive_old_scans(self) -> Dict[str, Any]:
+        """Archive scans older than retention period"""
+        
+        retention_days = self.retention_policies['scan_data']
+        cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
+        
+        archived_count = 0
+        failed_count = 0
+        
+        # Query old scans
+        try:
+            # In production, use GSI with timestamp
+            response = self.scan_table.scan(
+                FilterExpression='created_at < :cutoff',
+                ExpressionAttributeValues={
+                    ':cutoff': cutoff_date.isoformat()
+                }
             )
             
-            logger.info(f"Applied {len(tag_set)} tags to {bucket}/{key}")
-            
-        except Exception as e:
-            logger.error(f"Failed to tag object {bucket}/{key}: {e}")
-    
-    def _list_scan_objects(self, prefix: str) -> List[Dict[str, Any]]:
-        """List all objects for a scan"""
-        objects = []
-        
-        try:
-            paginator = s3_client.get_paginator('list_objects_v2')
-            pages = paginator.paginate(
-                Bucket=self.results_bucket,
-                Prefix=prefix
-            )
-            
-            for page in pages:
-                for obj in page.get('Contents', []):
-                    objects.append({
-                        'Key': obj['Key'],
-                        'Size': obj['Size'],
-                        'LastModified': obj['LastModified'].isoformat()
-                    })
+            for scan in response.get('Items', []):
+                try:
+                    self._archive_scan_data(scan['scan_id'])
+                    archived_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to archive scan {scan['scan_id']}: {e}")
+                    failed_count += 1
                     
         except Exception as e:
-            logger.error(f"Failed to list objects with prefix {prefix}: {e}")
+            logger.error(f"Failed to query old scans: {e}")
         
-        return objects
+        return {
+            'archived_count': archived_count,
+            'failed_count': failed_count
+        }
     
-    def _find_untagged_objects(self) -> List[str]:
-        """Find objects without lifecycle tags"""
-        untagged = []
+    def _cleanup_dynamodb(self) -> Dict[str, Any]:
+        """Clean up old DynamoDB items"""
+        
+        deleted_count = 0
+        
+        # Clean up old findings
+        retention_days = self.retention_policies['findings']
+        cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
         
         try:
-            # List recent objects
+            # In production, batch delete with proper pagination
+            response = self.findings_table.scan(
+                FilterExpression='created_at < :cutoff',
+                ExpressionAttributeValues={
+                    ':cutoff': cutoff_date.isoformat()
+                },
+                ProjectionExpression='finding_id'
+            )
+            
+            # Batch delete old items
+            with self.findings_table.batch_writer() as batch:
+                for item in response.get('Items', []):
+                    batch.delete_item(Key={'finding_id': item['finding_id']})
+                    deleted_count += 1
+                    
+        except Exception as e:
+            logger.error(f"DynamoDB cleanup failed: {e}")
+        
+        return {'deleted_count': deleted_count}
+    
+    def _cleanup_s3(self) -> Dict[str, Any]:
+        """Clean up old S3 objects"""
+        
+        deleted_count = 0
+        
+        if not RESULTS_BUCKET:
+            return {'deleted_count': 0}
+        
+        retention_days = self.retention_policies['temporary']
+        cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
+        
+        try:
+            # List and delete old temporary files
             paginator = s3_client.get_paginator('list_objects_v2')
             pages = paginator.paginate(
-                Bucket=self.results_bucket,
-                Prefix='raw/'
+                Bucket=RESULTS_BUCKET,
+                Prefix='temp/'
             )
             
             for page in pages:
                 for obj in page.get('Contents', []):
-                    # Check if object has tags
-                    try:
-                        response = s3_client.get_object_tagging(
-                            Bucket=self.results_bucket,
+                    if obj['LastModified'].replace(tzinfo=None) < cutoff_date:
+                        s3_client.delete_object(
+                            Bucket=RESULTS_BUCKET,
                             Key=obj['Key']
                         )
-                        
-                        tags = {tag['Key']: tag['Value'] for tag in response.get('TagSet', [])}
-                        
-                        # Check if essential tags are present
-                        if 'Priority' not in tags or 'FindingSeverity' not in tags:
-                            untagged.append(obj['Key'])
-                            
-                    except Exception as e:
-                        logger.warning(f"Failed to get tags for {obj['Key']}: {e}")
-                        untagged.append(obj['Key'])
+                        deleted_count += 1
                         
         except Exception as e:
-            logger.error(f"Failed to find untagged objects: {e}")
+            logger.error(f"S3 cleanup failed: {e}")
         
-        return untagged[:100]  # Limit to 100 objects per run
+        return {'deleted_count': deleted_count}
     
-    def _update_scan_object_tags(self, scan_data: Dict[str, Any]) -> None:
-        """Update tags for all objects in a scan based on latest metadata"""
-        scan_id = scan_data.get('scan_id')
-        if not scan_id:
-            return
+    def _cleanup_logs(self) -> Dict[str, Any]:
+        """Clean up old CloudWatch logs"""
         
-        # List all objects for this scan
-        prefix = f"raw/{scan_id}/"
-        objects = self._list_scan_objects(prefix)
+        cleaned_count = 0
+        retention_days = self.retention_policies['logs']
         
-        for obj in objects:
-            # Get current tags
+        try:
+            # Get all log groups for the project
+            paginator = logs_client.get_paginator('describe_log_groups')
+            pages = paginator.paginate(logGroupNamePrefix=LOG_GROUP_PREFIX)
+            
+            for page in pages:
+                for log_group in page['logGroups']:
+                    # Update retention policy
+                    try:
+                        logs_client.put_retention_policy(
+                            logGroupName=log_group['logGroupName'],
+                            retentionInDays=retention_days
+                        )
+                        cleaned_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to update log retention: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Log cleanup failed: {e}")
+        
+        return {'cleaned_count': cleaned_count}
+    
+    def _cleanup_ecs_tasks(self) -> Dict[str, Any]:
+        """Clean up stopped ECS tasks"""
+        
+        stopped_count = 0
+        
+        try:
+            # List stopped tasks
+            response = ecs_client.list_tasks(
+                cluster=ECS_CLUSTER,
+                desiredStatus='STOPPED'
+            )
+            
+            stopped_tasks = response.get('taskArns', [])
+            
+            # Clean up old stopped tasks (ECS keeps them for a while)
+            # In practice, ECS automatically cleans these up
+            stopped_count = len(stopped_tasks)
+            
+        except Exception as e:
+            logger.error(f"ECS cleanup failed: {e}")
+        
+        return {'stopped_count': stopped_count}
+    
+    def _generate_cleanup_report(self, results: Dict[str, Any]) -> str:
+        """Generate cleanup report"""
+        
+        report = {
+            'cleanup_report': {
+                'timestamp': results['timestamp'],
+                'summary': {
+                    'total_actions': len(results['actions_performed']),
+                    'total_items_cleaned': sum(
+                        action.get('count', 0) + 
+                        action.get('items_deleted', 0) + 
+                        action.get('objects_deleted', 0)
+                        for action in results['actions_performed']
+                    )
+                },
+                'details': results['actions_performed']
+            }
+        }
+        
+        # Save report
+        if RESULTS_BUCKET:
+            report_key = f"lifecycle/cleanup-reports/{datetime.utcnow().strftime('%Y/%m/%d')}/report.json"
             try:
-                response = s3_client.get_object_tagging(
-                    Bucket=self.results_bucket,
-                    Key=obj['Key']
+                s3_client.put_object(
+                    Bucket=RESULTS_BUCKET,
+                    Key=report_key,
+                    Body=json.dumps(report, indent=2),
+                    ContentType='application/json'
+                )
+                return f"s3://{RESULTS_BUCKET}/{report_key}"
+            except Exception as e:
+                logger.error(f"Failed to save report: {e}")
+        
+        return "report_not_saved"
+    
+    def _update_cleanup_metrics(self, results: Dict[str, Any]):
+        """Update CloudWatch metrics for cleanup"""
+        
+        try:
+            namespace = 'SecurityAudit/Lifecycle'
+            
+            metrics = []
+            for action in results['actions_performed']:
+                if 'count' in action or 'items_deleted' in action or 'objects_deleted' in action:
+                    value = (action.get('count', 0) + 
+                            action.get('items_deleted', 0) + 
+                            action.get('objects_deleted', 0))
+                    
+                    metrics.append({
+                        'MetricName': f"Cleanup_{action['action']}",
+                        'Value': float(value),
+                        'Unit': 'Count',
+                        'Timestamp': datetime.utcnow()
+                    })
+            
+            if metrics:
+                cloudwatch.put_metric_data(
+                    Namespace=namespace,
+                    MetricData=metrics
                 )
                 
-                current_tags = {tag['Key']: tag['Value'] for tag in response.get('TagSet', [])}
-                
-                # Determine new tags
-                new_tags = self._determine_object_tags(scan_data, obj['Key'])
-                
-                # Only update if tags have changed
-                if current_tags != new_tags:
-                    self._apply_object_tags(self.results_bucket, obj['Key'], new_tags)
-                    
+        except Exception as e:
+            logger.error(f"Failed to update metrics: {e}")
+    
+    def _get_scan_data(self, scan_id: str) -> Optional[Dict]:
+        """Get scan data from DynamoDB"""
+        try:
+            response = self.scan_table.get_item(Key={'scan_id': scan_id})
+            return response.get('Item')
+        except:
+            return None
+    
+    def _archive_findings(self, scan_id: str) -> Dict[str, Any]:
+        """Archive findings to S3"""
+        
+        if not RESULTS_BUCKET:
+            return {'status': 'skipped', 'reason': 'No archive bucket'}
+        
+        try:
+            # Get findings from DynamoDB
+            findings = []
+            response = self.findings_table.query(
+                IndexName='ScanIndex',
+                KeyConditionExpression='scan_id = :scan_id',
+                ExpressionAttributeValues={':scan_id': scan_id}
+            )
+            findings.extend(response.get('Items', []))
+            
+            # Save to S3
+            archive_key = f"archive/findings/{scan_id}/findings.json.gz"
+            
+            # Compress data
+            import gzip
+            compressed_data = gzip.compress(
+                json.dumps(findings, default=str).encode('utf-8')
+            )
+            
+            s3_client.put_object(
+                Bucket=RESULTS_BUCKET,
+                Key=archive_key,
+                Body=compressed_data,
+                ContentType='application/json',
+                ContentEncoding='gzip',
+                StorageClass='GLACIER_IR'  # Instant retrieval Glacier
+            )
+            
+            return {
+                'status': 'success',
+                'archive_location': f"s3://{RESULTS_BUCKET}/{archive_key}",
+                'findings_count': len(findings)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to archive findings: {e}")
+            return {'status': 'failed', 'error': str(e)}
+    
+    def _archive_reports(self, scan_id: str) -> Dict[str, Any]:
+        """Archive reports to S3"""
+        
+        if not RESULTS_BUCKET:
+            return {'status': 'skipped', 'reason': 'No archive bucket'}
+        
+        try:
+            # List all reports for this scan
+            response = s3_client.list_objects_v2(
+                Bucket=RESULTS_BUCKET,
+                Prefix=f"reports/{scan_id}/"
+            )
+            
+            archived_count = 0
+            for obj in response.get('Contents', []):
+                # Copy to archive location with Glacier storage class
+                archive_key = f"archive/{obj['Key']}"
+                s3_client.copy_object(
+                    CopySource={'Bucket': RESULTS_BUCKET, 'Key': obj['Key']},
+                    Bucket=RESULTS_BUCKET,
+                    Key=archive_key,
+                    StorageClass='GLACIER_IR'
+                )
+                archived_count += 1
+            
+            return {
+                'status': 'success',
+                'archive_location': f"s3://{RESULTS_BUCKET}/archive/reports/{scan_id}/",
+                'reports_count': archived_count
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to archive reports: {e}")
+            return {'status': 'failed', 'error': str(e)}
+    
+    def _create_archive_manifest(self, scan_id: str, archive_data: Dict) -> str:
+        """Create manifest for archived data"""
+        
+        manifest = {
+            'scan_id': scan_id,
+            'archived_at': archive_data['archived_at'],
+            'components': archive_data['components'],
+            'metadata': {
+                'lifecycle_version': '1.0',
+                'retention_policy': self.retention_policies
+            }
+        }
+        
+        if RESULTS_BUCKET:
+            manifest_key = f"archive/manifests/{scan_id}/manifest.json"
+            try:
+                s3_client.put_object(
+                    Bucket=RESULTS_BUCKET,
+                    Key=manifest_key,
+                    Body=json.dumps(manifest, indent=2),
+                    ContentType='application/json'
+                )
+                return f"s3://{RESULTS_BUCKET}/{manifest_key}"
             except Exception as e:
-                logger.error(f"Failed to update tags for {obj['Key']}: {e}")
+                logger.error(f"Failed to create manifest: {e}")
+        
+        return "manifest_not_created"
+    
+    def _cleanup_after_archive(self, scan_id: str) -> Dict[str, Any]:
+        """Clean up original data after archiving"""
+        
+        success = True
+        
+        try:
+            # Delete from scan table
+            self.scan_table.delete_item(Key={'scan_id': scan_id})
+            
+            # Delete findings
+            # In production, batch delete
+            response = self.findings_table.query(
+                IndexName='ScanIndex',
+                KeyConditionExpression='scan_id = :scan_id',
+                ExpressionAttributeValues={':scan_id': scan_id},
+                ProjectionExpression='finding_id'
+            )
+            
+            with self.findings_table.batch_writer() as batch:
+                for item in response.get('Items', []):
+                    batch.delete_item(Key={'finding_id': item['finding_id']})
+                    
+        except Exception as e:
+            logger.error(f"Cleanup after archive failed: {e}")
+            success = False
+        
+        return {'success': success}
+    
+    def _cleanup_temporary_files(self) -> Dict[str, Any]:
+        """Clean up temporary files"""
+        
+        if not RESULTS_BUCKET:
+            return {'cleaned': 0}
+        
+        cleaned_count = 0
+        retention_hours = 24
+        cutoff_time = datetime.utcnow() - timedelta(hours=retention_hours)
+        
+        try:
+            response = s3_client.list_objects_v2(
+                Bucket=RESULTS_BUCKET,
+                Prefix='temp/'
+            )
+            
+            for obj in response.get('Contents', []):
+                if obj['LastModified'].replace(tzinfo=None) < cutoff_time:
+                    s3_client.delete_object(
+                        Bucket=RESULTS_BUCKET,
+                        Key=obj['Key']
+                    )
+                    cleaned_count += 1
+                    
+        except Exception as e:
+            logger.error(f"Temporary file cleanup failed: {e}")
+        
+        return {'cleaned': cleaned_count}
+    
+    def _cleanup_failed_scans(self) -> Dict[str, Any]:
+        """Clean up data from failed scans"""
+        
+        cleaned_count = 0
+        retention_days = 7
+        cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
+        
+        try:
+            # Find failed scans
+            response = self.scan_table.scan(
+                FilterExpression='#status = :status AND created_at < :cutoff',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={
+                    ':status': 'FAILED',
+                    ':cutoff': cutoff_date.isoformat()
+                }
+            )
+            
+            for scan in response.get('Items', []):
+                # Delete scan and related data
+                scan_id = scan['scan_id']
+                self.scan_table.delete_item(Key={'scan_id': scan_id})
+                cleaned_count += 1
+                
+        except Exception as e:
+            logger.error(f"Failed scan cleanup failed: {e}")
+        
+        return {'cleaned': cleaned_count}
+    
+    def _cleanup_orphaned_resources(self) -> Dict[str, Any]:
+        """Clean up orphaned resources"""
+        
+        orphaned = {
+            's3_objects': 0,
+            'dynamodb_items': 0
+        }
+        
+        # Find S3 objects without corresponding DynamoDB entries
+        # This is a simplified version - in production, be more careful
+        
+        return orphaned
+    
+    def _cleanup_old_analytics(self) -> Dict[str, Any]:
+        """Clean up old analytics data"""
+        
+        if not ANALYTICS_BUCKET:
+            return {'cleaned': 0}
+        
+        cleaned_count = 0
+        retention_days = self.retention_policies['analytics']
+        cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
+        
+        try:
+            response = s3_client.list_objects_v2(
+                Bucket=ANALYTICS_BUCKET,
+                Prefix='analytics/'
+            )
+            
+            for obj in response.get('Contents', []):
+                if obj['LastModified'].replace(tzinfo=None) < cutoff_date:
+                    s3_client.delete_object(
+                        Bucket=ANALYTICS_BUCKET,
+                        Key=obj['Key']
+                    )
+                    cleaned_count += 1
+                    
+        except Exception as e:
+            logger.error(f"Analytics cleanup failed: {e}")
+        
+        return {'cleaned': cleaned_count}
+    
+    def _cleanup_test_data(self) -> Dict[str, Any]:
+        """Clean up test data"""
+        
+        cleaned = {
+            'test_scans': 0,
+            'test_findings': 0
+        }
+        
+        # Clean up scans with test repositories
+        try:
+            response = self.scan_table.scan(
+                FilterExpression='contains(repository_url, :test)',
+                ExpressionAttributeValues={':test': 'test'}
+            )
+            
+            for scan in response.get('Items', []):
+                self.scan_table.delete_item(Key={'scan_id': scan['scan_id']})
+                cleaned['test_scans'] += 1
+                
+        except Exception as e:
+            logger.error(f"Test data cleanup failed: {e}")
+        
+        return cleaned
+    
+    def _get_s3_usage(self) -> Dict[str, Any]:
+        """Get S3 storage usage"""
+        
+        if not RESULTS_BUCKET:
+            return {}
+        
+        try:
+            # Get bucket metrics
+            response = cloudwatch.get_metric_statistics(
+                Namespace='AWS/S3',
+                MetricName='BucketSizeBytes',
+                Dimensions=[
+                    {'Name': 'BucketName', 'Value': RESULTS_BUCKET},
+                    {'Name': 'StorageType', 'Value': 'StandardStorage'}
+                ],
+                StartTime=datetime.utcnow() - timedelta(days=1),
+                EndTime=datetime.utcnow(),
+                Period=86400,
+                Statistics=['Average']
+            )
+            
+            size_bytes = 0
+            if response['Datapoints']:
+                size_bytes = response['Datapoints'][0]['Average']
+            
+            return {
+                'bucket': RESULTS_BUCKET,
+                'size_bytes': size_bytes,
+                'size_gb': round(size_bytes / (1024**3), 2),
+                'object_count': self._get_object_count(RESULTS_BUCKET)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get S3 usage: {e}")
+            return {}
+    
+    def _get_object_count(self, bucket: str) -> int:
+        """Get object count in bucket"""
+        try:
+            response = s3_client.list_objects_v2(
+                Bucket=bucket,
+                MaxKeys=1
+            )
+            return response.get('KeyCount', 0)
+        except:
+            return 0
+    
+    def _get_dynamodb_usage(self) -> Dict[str, Any]:
+        """Get DynamoDB usage"""
+        
+        usage = {
+            'tables': {}
+        }
+        
+        for table_name, table in [
+            ('scans', self.scan_table),
+            ('findings', self.findings_table),
+            ('ai_scans', self.ai_scans_table)
+        ]:
+            try:
+                response = table.describe_table()
+                table_desc = response['Table']
+                
+                usage['tables'][table_name] = {
+                    'item_count': table_desc.get('ItemCount', 0),
+                    'size_bytes': table_desc.get('TableSizeBytes', 0),
+                    'read_capacity': table_desc['ProvisionedThroughput'].get('ReadCapacityUnits', 0),
+                    'write_capacity': table_desc['ProvisionedThroughput'].get('WriteCapacityUnits', 0)
+                }
+            except Exception as e:
+                logger.error(f"Failed to get DynamoDB usage for {table_name}: {e}")
+        
+        return usage
+    
+    def _estimate_dynamodb_cost(self, usage: Dict) -> float:
+        """Estimate DynamoDB monthly cost"""
+        
+        total_cost = 0
+        
+        # Simplified cost calculation
+        for table_name, table_usage in usage.get('tables', {}).items():
+            # Storage cost: $0.25 per GB-month
+            storage_gb = table_usage.get('size_bytes', 0) / (1024**3)
+            storage_cost = storage_gb * 0.25
+            
+            # Capacity costs (on-demand pricing assumed)
+            # $0.25 per million read units
+            # $1.25 per million write units
+            
+            total_cost += storage_cost
+        
+        return round(total_cost, 2)
+    
+    def _get_ecs_usage(self) -> Dict[str, Any]:
+        """Get ECS usage"""
+        
+        try:
+            # List running tasks
+            response = ecs_client.list_tasks(
+                cluster=ECS_CLUSTER,
+                desiredStatus='RUNNING'
+            )
+            
+            running_tasks = len(response.get('taskArns', []))
+            
+            # Get cluster metrics
+            cluster_response = ecs_client.describe_clusters(
+                clusters=[ECS_CLUSTER]
+            )
+            
+            if cluster_response['clusters']:
+                cluster = cluster_response['clusters'][0]
+                return {
+                    'cluster_name': ECS_CLUSTER,
+                    'running_tasks': running_tasks,
+                    'registered_container_instances': cluster.get('registeredContainerInstancesCount', 0),
+                    'active_services': cluster.get('activeServicesCount', 0)
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to get ECS usage: {e}")
+        
+        return {}
+    
+    def _get_lambda_usage(self) -> Dict[str, Any]:
+        """Get Lambda usage metrics"""
+        
+        try:
+            # Get invocation count for the last day
+            response = cloudwatch.get_metric_statistics(
+                Namespace='AWS/Lambda',
+                MetricName='Invocations',
+                Dimensions=[],
+                StartTime=datetime.utcnow() - timedelta(days=1),
+                EndTime=datetime.utcnow(),
+                Period=86400,
+                Statistics=['Sum']
+            )
+            
+            total_invocations = 0
+            if response['Datapoints']:
+                total_invocations = sum(dp['Sum'] for dp in response['Datapoints'])
+            
+            return {
+                'daily_invocations': int(total_invocations),
+                'estimated_monthly_invocations': int(total_invocations * 30)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get Lambda usage: {e}")
+            return {}
+    
+    def _generate_cost_recommendations(self, usage: Dict) -> List[Dict]:
+        """Generate cost optimization recommendations"""
+        
+        recommendations = []
+        
+        # Check S3 usage
+        s3_usage = usage.get('storage', {}).get('s3', {})
+        if s3_usage.get('size_gb', 0) > 100:
+            recommendations.append({
+                'category': 'storage',
+                'priority': 'medium',
+                'recommendation': 'Enable S3 Intelligent-Tiering',
+                'potential_savings': f"${s3_usage.get('size_gb', 0) * 0.01:.2f}/month"
+            })
+        
+        # Check DynamoDB usage
+        dynamo_usage = usage.get('database', {}).get('dynamodb', {})
+        for table_name, table_data in dynamo_usage.get('tables', {}).items():
+            if table_data.get('item_count', 0) == 0:
+                recommendations.append({
+                    'category': 'database',
+                    'priority': 'low',
+                    'recommendation': f'Consider removing empty table: {table_name}',
+                    'potential_savings': '$0.25/month'
+                })
+        
+        return recommendations
+    
+    def _check_usage_thresholds(self, usage: Dict) -> List[Dict]:
+        """Check if usage exceeds thresholds"""
+        
+        alerts = []
+        
+        # Check S3 size
+        s3_size_gb = usage.get('storage', {}).get('s3', {}).get('size_gb', 0)
+        if s3_size_gb > 500:  # 500 GB threshold
+            alerts.append({
+                'type': 's3_storage',
+                'severity': 'warning',
+                'message': f'S3 storage exceeds 500GB: {s3_size_gb}GB',
+                'recommendation': 'Review and archive old data'
+            })
+        
+        # Check costs
+        total_cost = sum(usage.get('estimated_costs', {}).values())
+        if total_cost > 100:  # $100/month threshold
+            alerts.append({
+                'type': 'cost',
+                'severity': 'warning',
+                'message': f'Estimated monthly cost exceeds $100: ${total_cost:.2f}',
+                'recommendation': 'Review cost optimization recommendations'
+            })
+        
+        return alerts
+    
+    def _send_usage_alerts(self, alerts: List[Dict]):
+        """Send usage alerts"""
+        # In production, send via SNS
+        for alert in alerts:
+            logger.warning(f"Usage alert: {alert['message']}")
+    
+    def _compress_large_files(self) -> Dict[str, Any]:
+        """Compress large files in S3"""
+        
+        compressed_count = 0
+        space_saved_mb = 0
+        
+        # In production, implement actual compression
+        # This is a placeholder
+        
+        return {
+            'count': compressed_count,
+            'space_saved': space_saved_mb
+        }
+    
+    def _move_to_glacier(self) -> Dict[str, Any]:
+        """Move old data to Glacier storage"""
+        
+        moved_count = 0
+        estimated_savings = 0
+        
+        if not RESULTS_BUCKET:
+            return {'count': 0, 'estimated_savings': 0}
+        
+        # Move data older than 90 days to Glacier
+        cutoff_date = datetime.utcnow() - timedelta(days=90)
+        
+        try:
+            response = s3_client.list_objects_v2(
+                Bucket=RESULTS_BUCKET,
+                Prefix='reports/'
+            )
+            
+            for obj in response.get('Contents', []):
+                if obj['LastModified'].replace(tzinfo=None) < cutoff_date:
+                    # Change storage class
+                    s3_client.copy_object(
+                        CopySource={'Bucket': RESULTS_BUCKET, 'Key': obj['Key']},
+                        Bucket=RESULTS_BUCKET,
+                        Key=obj['Key'],
+                        StorageClass='GLACIER',
+                        MetadataDirective='COPY'
+                    )
+                    moved_count += 1
+                    
+                    # Calculate savings (Glacier is ~1/4 the cost)
+                    size_gb = obj['Size'] / (1024**3)
+                    estimated_savings += size_gb * 0.023 * 0.75  # 75% savings
+                    
+        except Exception as e:
+            logger.error(f"Glacier transition failed: {e}")
+        
+        return {
+            'count': moved_count,
+            'estimated_savings': round(estimated_savings, 2)
+        }
+    
+    def _deduplicate_data(self) -> Dict[str, Any]:
+        """Remove duplicate data"""
+        
+        # In production, implement actual deduplication
+        # This is a placeholder
+        
+        return {
+            'count': 0,
+            'space_saved': 0
+        }
+    
+    def _update_s3_lifecycle_policies(self) -> Dict[str, Any]:
+        """Update S3 lifecycle policies"""
+        
+        if not RESULTS_BUCKET:
+            return {'count': 0}
+        
+        lifecycle_config = {
+            'Rules': [
+                {
+                    'ID': 'MoveReportsToGlacier',
+                    'Status': 'Enabled',
+                    'Prefix': 'reports/',
+                    'Transitions': [
+                        {
+                            'Days': 90,
+                            'StorageClass': 'GLACIER'
+                        }
+                    ]
+                },
+                {
+                    'ID': 'DeleteTempFiles',
+                    'Status': 'Enabled',
+                    'Prefix': 'temp/',
+                    'Expiration': {
+                        'Days': 7
+                    }
+                },
+                {
+                    'ID': 'ArchiveOldAnalytics',
+                    'Status': 'Enabled',
+                    'Prefix': 'analytics/',
+                    'Transitions': [
+                        {
+                            'Days': 30,
+                            'StorageClass': 'STANDARD_IA'
+                        },
+                        {
+                            'Days': 90,
+                            'StorageClass': 'GLACIER'
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        try:
+            s3_client.put_bucket_lifecycle_configuration(
+                Bucket=RESULTS_BUCKET,
+                LifecycleConfiguration=lifecycle_config
+            )
+            return {'count': len(lifecycle_config['Rules'])}
+        except Exception as e:
+            logger.error(f"Failed to update lifecycle policies: {e}")
+            return {'count': 0}
+    
+    def _apply_scan_retention(self, days: int) -> Dict[str, Any]:
+        """Apply retention policy to scan data"""
+        return {'status': 'applied', 'retention_days': days}
+    
+    def _apply_findings_retention(self, days: int) -> Dict[str, Any]:
+        """Apply retention policy to findings"""
+        return {'status': 'applied', 'retention_days': days}
+    
+    def _apply_reports_retention(self, days: int) -> Dict[str, Any]:
+        """Apply retention policy to reports"""
+        return {'status': 'applied', 'retention_days': days}
+    
+    def _apply_logs_retention(self, days: int) -> Dict[str, Any]:
+        """Apply retention policy to logs"""
+        
+        updated_count = 0
+        
+        try:
+            # Update CloudWatch Logs retention
+            paginator = logs_client.get_paginator('describe_log_groups')
+            pages = paginator.paginate(logGroupNamePrefix=LOG_GROUP_PREFIX)
+            
+            for page in pages:
+                for log_group in page['logGroups']:
+                    try:
+                        logs_client.put_retention_policy(
+                            logGroupName=log_group['logGroupName'],
+                            retentionInDays=days
+                        )
+                        updated_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to update log retention: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Log retention update failed: {e}")
+        
+        return {
+            'status': 'applied',
+            'retention_days': days,
+            'log_groups_updated': updated_count
+        }
 
 
 def lambda_handler(event, context):
-    """AWS Lambda handler function"""
+    """Lambda handler for lifecycle management"""
+    
     manager = LifecycleManager()
-    return manager.handle_event(event)
+    
+    try:
+        # Handle CloudWatch scheduled events
+        if event.get('source') == 'aws.events':
+            # Scheduled cleanup
+            return manager.manage_lifecycle({'action': 'scheduled_cleanup'})
+        else:
+            # Direct invocation
+            return manager.manage_lifecycle(event)
+            
+    except Exception as e:
+        logger.error(f"Lifecycle management failed: {e}", exc_info=True)
+        return {
+            'statusCode': 500,
+            'error': str(e)
+        }

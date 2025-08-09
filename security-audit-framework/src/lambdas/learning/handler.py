@@ -1,573 +1,917 @@
 """
-Learning from Results Lambda - Analyzes historical scan data to improve future scans
+Machine Learning Feedback Lambda - Handles model training and improvement based on scan results
 """
 import os
 import json
 import boto3
-from typing import Dict, List, Any, Tuple, Set
+import logging
 from datetime import datetime, timedelta
-from collections import defaultdict
+from typing import Dict, List, Any, Optional, Tuple
 import hashlib
+from collections import defaultdict
 
+# Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# AWS clients
 s3_client = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
-athena_client = boto3.client('athena')
+sagemaker_client = boto3.client('sagemaker')
+bedrock_runtime = boto3.client('bedrock-runtime')
+
+# Environment variables
+FINDINGS_TABLE = os.environ.get('AI_FINDINGS_TABLE', 'SecurityAuditAIFindings')
+FEEDBACK_TABLE = os.environ.get('FEEDBACK_TABLE', 'SecurityFeedback')
+MODEL_METADATA_TABLE = os.environ.get('MODEL_METADATA_TABLE', 'SecurityModelMetadata')
+TRAINING_BUCKET = os.environ.get('TRAINING_BUCKET')
+MODEL_BUCKET = os.environ.get('MODEL_BUCKET')
+MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'anthropic.claude-3-sonnet-20240229-v1:0')
 
 
-class LearningEngine:
-    """Machine learning-inspired engine for improving scan effectiveness"""
+class MLFeedbackHandler:
+    """Handles machine learning feedback and model improvement"""
     
     def __init__(self):
-        self.scan_table = dynamodb.Table(os.environ.get('SCAN_TABLE', 'SecurityScans'))
-        self.learning_table = dynamodb.Table(os.environ.get('LEARNING_TABLE', 'SecurityLearning'))
-        self.results_bucket = os.environ.get('RESULTS_BUCKET')
+        self.findings_table = dynamodb.Table(FINDINGS_TABLE)
+        self.feedback_table = dynamodb.Table(FEEDBACK_TABLE)
+        self.model_metadata_table = dynamodb.Table(MODEL_METADATA_TABLE)
         
-        # Learning patterns storage
-        self.false_positive_patterns = []
-        self.high_value_patterns = []
-        self.scan_performance_metrics = {}
+    def process_feedback(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process feedback for ML model improvement
         
-    def learn_from_scan(self, scan_id: str) -> Dict[str, Any]:
-        """Analyze a completed scan to extract learnings"""
-        # Load scan metadata
-        scan_metadata = self._load_scan_metadata(scan_id)
+        Feedback types:
+        1. False positive/negative marking
+        2. Severity adjustment
+        3. Pattern validation
+        4. Model performance metrics
+        """
         
-        # Load findings
-        findings = self._load_scan_findings(scan_id)
+        feedback_type = event.get('feedback_type', 'finding_validation')
         
-        # Load feedback if available
-        feedback = self._load_feedback(scan_id)
+        if feedback_type == 'finding_validation':
+            return self._process_finding_validation(event)
+        elif feedback_type == 'batch_feedback':
+            return self._process_batch_feedback(event)
+        elif feedback_type == 'model_evaluation':
+            return self._evaluate_model_performance(event)
+        elif feedback_type == 'pattern_learning':
+            return self._learn_new_patterns(event)
+        elif feedback_type == 'threshold_adjustment':
+            return self._adjust_detection_thresholds(event)
+        elif feedback_type == 'trigger_training':
+            return self._trigger_model_training(event)
+        else:
+            return {'statusCode': 400, 'message': f'Unknown feedback type: {feedback_type}'}
+    
+    def _process_finding_validation(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Process validation feedback for individual findings"""
         
-        # Extract learnings
-        learnings = {
-            'scan_id': scan_id,
+        finding_id = event.get('finding_id')
+        validation = event.get('validation')  # true_positive, false_positive, etc.
+        user_id = event.get('user_id', 'system')
+        reason = event.get('reason', '')
+        
+        if not finding_id or not validation:
+            return {'statusCode': 400, 'message': 'finding_id and validation required'}
+        
+        # Store feedback
+        feedback_record = {
+            'feedback_id': f"{finding_id}-{datetime.utcnow().timestamp()}",
+            'finding_id': finding_id,
+            'validation': validation,
+            'user_id': user_id,
+            'reason': reason,
             'timestamp': datetime.utcnow().isoformat(),
-            'patterns': self._extract_patterns(findings, feedback),
-            'performance': self._analyze_performance(scan_metadata),
-            'effectiveness': self._calculate_effectiveness(findings, feedback),
-            'recommendations': self._generate_recommendations(findings, scan_metadata)
+            'processed': False
         }
         
-        # Store learnings
-        self._store_learnings(scan_id, learnings)
+        try:
+            self.feedback_table.put_item(Item=feedback_record)
+        except Exception as e:
+            logger.error(f"Failed to store feedback: {e}")
+            return {'statusCode': 500, 'error': str(e)}
         
-        # Update global learning model
-        self._update_global_model(learnings)
+        # Update finding with feedback
+        self._update_finding_with_feedback(finding_id, validation)
         
-        return learnings
-    
-    def _extract_patterns(self, findings: List[Dict[str, Any]], 
-                         feedback: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract patterns from findings and feedback"""
-        patterns = {
-            'false_positives': [],
-            'true_positives': [],
-            'severity_accuracy': {},
-            'tool_effectiveness': defaultdict(dict)
-        }
+        # If false positive, analyze why
+        if validation == 'false_positive':
+            analysis = self._analyze_false_positive(finding_id, reason)
+            feedback_record['false_positive_analysis'] = analysis
         
-        # Process feedback on findings
-        if feedback and 'finding_feedback' in feedback:
-            for finding_id, fb in feedback['finding_feedback'].items():
-                finding = next((f for f in findings if f.get('finding_id') == finding_id), None)
-                if finding:
-                    if fb.get('is_false_positive'):
-                        patterns['false_positives'].append({
-                            'type': finding.get('vulnerability_type'),
-                            'pattern': self._extract_finding_pattern(finding),
-                            'tool': finding.get('type', 'UNKNOWN')
-                        })
-                    else:
-                        patterns['true_positives'].append({
-                            'type': finding.get('vulnerability_type'),
-                            'severity': finding.get('severity'),
-                            'confidence': finding.get('confidence')
-                        })
-                    
-                    # Track severity accuracy
-                    if fb.get('actual_severity'):
-                        reported = finding.get('severity', 'MEDIUM')
-                        actual = fb['actual_severity']
-                        key = f"{reported}_to_{actual}"
-                        patterns['severity_accuracy'][key] = \
-                            patterns['severity_accuracy'].get(key, 0) + 1
+        # Check if we have enough feedback to trigger learning
+        feedback_count = self._get_recent_feedback_count()
+        if feedback_count >= 100:  # Configurable threshold
+            self._trigger_learning_job()
         
-        # Analyze tool effectiveness
-        for finding in findings:
-            tool = finding.get('type', 'UNKNOWN')
-            severity = finding.get('severity', 'MEDIUM')
-            patterns['tool_effectiveness'][tool][severity] = \
-                patterns['tool_effectiveness'][tool].get(severity, 0) + 1
-        
-        return patterns
-    
-    def _extract_finding_pattern(self, finding: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract pattern features from a finding"""
         return {
-            'file_extension': os.path.splitext(finding.get('file_path', ''))[1],
-            'code_pattern': self._normalize_code_pattern(finding.get('code_snippet', '')),
-            'message_keywords': self._extract_keywords(finding.get('message', '')),
-            'line_context': finding.get('start_line', 0) // 100  # Rough position in file
+            'statusCode': 200,
+            'feedback_id': feedback_record['feedback_id'],
+            'finding_id': finding_id,
+            'validation': validation,
+            'feedback_count': feedback_count,
+            'learning_triggered': feedback_count >= 100
         }
     
-    def _normalize_code_pattern(self, code: str) -> str:
-        """Normalize code pattern for comparison"""
-        # Simple normalization - in production, use AST
-        normalized = code.lower()
-        # Replace variable names with placeholders
-        import re
-        normalized = re.sub(r'\b[a-z_][a-z0-9_]*\b', 'VAR', normalized)
-        normalized = re.sub(r'\b\d+\b', 'NUM', normalized)
-        normalized = re.sub(r'[\'"].*?[\'"]', 'STR', normalized)
-        return normalized[:100]  # Truncate
-    
-    def _extract_keywords(self, message: str) -> List[str]:
-        """Extract keywords from finding message"""
-        stop_words = {'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'with'}
-        words = message.lower().split()
-        return [w for w in words if len(w) > 3 and w not in stop_words][:5]
-    
-    def _analyze_performance(self, scan_metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze scan performance metrics"""
-        execution_plan = scan_metadata.get('execution_plan', {})
+    def _process_batch_feedback(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Process feedback for multiple findings at once"""
         
-        performance = {
-            'total_duration': scan_metadata.get('duration_seconds', 0),
-            'total_cost': execution_plan.get('total_estimated_cost', 0),
-            'agents_used': len(execution_plan.get('tasks', [])),
-            'cost_per_finding': 0,
-            'scan_efficiency': 0
+        feedback_items = event.get('feedback_items', [])
+        user_id = event.get('user_id', 'system')
+        
+        processed = []
+        failed = []
+        
+        for item in feedback_items:
+            try:
+                result = self._process_finding_validation({
+                    'finding_id': item.get('finding_id'),
+                    'validation': item.get('validation'),
+                    'user_id': user_id,
+                    'reason': item.get('reason', '')
+                })
+                processed.append(item.get('finding_id'))
+            except Exception as e:
+                failed.append({
+                    'finding_id': item.get('finding_id'),
+                    'error': str(e)
+                })
+        
+        return {
+            'statusCode': 200,
+            'processed_count': len(processed),
+            'failed_count': len(failed),
+            'processed': processed,
+            'failed': failed
+        }
+    
+    def _evaluate_model_performance(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Evaluate model performance based on feedback"""
+        
+        time_range = event.get('time_range', 'last_7_days')
+        model_version = event.get('model_version', 'current')
+        
+        # Get feedback data
+        feedback_data = self._get_feedback_data(time_range)
+        
+        # Calculate metrics
+        metrics = self._calculate_performance_metrics(feedback_data)
+        
+        # Analyze patterns in false positives/negatives
+        error_analysis = self._analyze_error_patterns(feedback_data)
+        
+        # Generate improvement recommendations
+        recommendations = self._generate_improvement_recommendations(metrics, error_analysis)
+        
+        # Store evaluation results
+        evaluation = {
+            'evaluation_id': f"eval-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            'timestamp': datetime.utcnow().isoformat(),
+            'model_version': model_version,
+            'time_range': time_range,
+            'metrics': metrics,
+            'error_analysis': error_analysis,
+            'recommendations': recommendations
         }
         
-        # Calculate cost per finding
-        total_findings = scan_metadata.get('total_findings', 0)
-        if total_findings > 0:
-            performance['cost_per_finding'] = performance['total_cost'] / total_findings
-            performance['scan_efficiency'] = total_findings / max(performance['total_duration'], 1)
+        # Save evaluation
+        if MODEL_BUCKET:
+            self._save_evaluation(evaluation)
         
-        return performance
+        return {
+            'statusCode': 200,
+            'evaluation_id': evaluation['evaluation_id'],
+            'metrics': metrics,
+            'recommendations': recommendations
+        }
     
-    def _calculate_effectiveness(self, findings: List[Dict[str, Any]], 
-                               feedback: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate scan effectiveness metrics"""
-        total_findings = len(findings)
+    def _learn_new_patterns(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Learn new vulnerability patterns from validated findings"""
         
-        effectiveness = {
-            'total_findings': total_findings,
-            'true_positive_rate': 0,
-            'false_positive_rate': 0,
-            'severity_distribution': defaultdict(int),
-            'confidence_accuracy': 0
+        pattern_type = event.get('pattern_type', 'vulnerability')
+        min_occurrences = event.get('min_occurrences', 5)
+        
+        # Get validated findings
+        validated_findings = self._get_validated_findings()
+        
+        # Extract patterns
+        patterns = self._extract_patterns(validated_findings, pattern_type)
+        
+        # Filter patterns by occurrence
+        significant_patterns = [
+            p for p in patterns 
+            if p['occurrences'] >= min_occurrences
+        ]
+        
+        # Generate pattern rules
+        new_rules = []
+        for pattern in significant_patterns:
+            rule = self._generate_pattern_rule(pattern)
+            new_rules.append(rule)
+        
+        # Store new patterns
+        stored_patterns = self._store_patterns(new_rules)
+        
+        # Update detection engine
+        if new_rules:
+            self._update_detection_rules(new_rules)
+        
+        return {
+            'statusCode': 200,
+            'patterns_found': len(patterns),
+            'significant_patterns': len(significant_patterns),
+            'new_rules_created': len(new_rules),
+            'stored_patterns': stored_patterns
+        }
+    
+    def _adjust_detection_thresholds(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Adjust detection thresholds based on feedback"""
+        
+        threshold_type = event.get('threshold_type', 'confidence')
+        adjustment_factor = event.get('adjustment_factor', 'auto')
+        
+        # Get current thresholds
+        current_thresholds = self._get_current_thresholds()
+        
+        # Calculate optimal thresholds based on feedback
+        if adjustment_factor == 'auto':
+            optimal_thresholds = self._calculate_optimal_thresholds()
+        else:
+            optimal_thresholds = self._apply_manual_adjustment(
+                current_thresholds, adjustment_factor
+            )
+        
+        # Validate threshold changes
+        validation = self._validate_threshold_changes(
+            current_thresholds, optimal_thresholds
+        )
+        
+        if validation['safe_to_apply']:
+            # Apply new thresholds
+            self._apply_thresholds(optimal_thresholds)
+            status = 'applied'
+        else:
+            status = 'requires_review'
+        
+        return {
+            'statusCode': 200,
+            'status': status,
+            'current_thresholds': current_thresholds,
+            'recommended_thresholds': optimal_thresholds,
+            'validation': validation,
+            'expected_impact': self._estimate_threshold_impact(
+                current_thresholds, optimal_thresholds
+            )
+        }
+    
+    def _trigger_model_training(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Trigger model training job"""
+        
+        training_type = event.get('training_type', 'incremental')
+        dataset_config = event.get('dataset_config', {})
+        
+        # Prepare training data
+        training_data = self._prepare_training_data(dataset_config)
+        
+        # Create training job configuration
+        job_config = {
+            'job_name': f"security-model-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            'training_type': training_type,
+            'dataset': training_data['dataset_location'],
+            'hyperparameters': self._get_hyperparameters(training_type),
+            'evaluation_metrics': ['precision', 'recall', 'f1_score', 'false_positive_rate']
         }
         
-        if feedback and 'finding_feedback' in feedback:
-            false_positives = sum(1 for fb in feedback['finding_feedback'].values() 
-                                if fb.get('is_false_positive'))
-            true_positives = total_findings - false_positives
+        # For Bedrock models, we would fine-tune if supported
+        # For now, we'll simulate training process
+        if training_type == 'fine_tuning':
+            # In production, trigger Bedrock fine-tuning if available
+            training_job = self._simulate_fine_tuning(job_config)
+        else:
+            # Incremental learning through prompt engineering
+            training_job = self._incremental_learning(job_config)
+        
+        return {
+            'statusCode': 200,
+            'job_name': job_config['job_name'],
+            'training_type': training_type,
+            'dataset_size': training_data['sample_count'],
+            'status': training_job['status'],
+            'estimated_completion': training_job.get('estimated_completion')
+        }
+    
+    def _update_finding_with_feedback(self, finding_id: str, validation: str):
+        """Update finding record with feedback"""
+        try:
+            self.findings_table.update_item(
+                Key={'finding_id': finding_id},
+                UpdateExpression='SET validation_status = :status, validation_timestamp = :ts',
+                ExpressionAttributeValues={
+                    ':status': validation,
+                    ':ts': datetime.utcnow().isoformat()
+                }
+            )
+        except Exception as e:
+            logger.error(f"Failed to update finding: {e}")
+    
+    def _analyze_false_positive(self, finding_id: str, reason: str) -> Dict[str, Any]:
+        """Analyze why a finding was marked as false positive"""
+        
+        # Get finding details
+        try:
+            response = self.findings_table.get_item(Key={'finding_id': finding_id})
+            finding = response.get('Item', {})
+        except:
+            return {}
+        
+        analysis = {
+            'finding_type': finding.get('finding_type'),
+            'confidence_level': finding.get('confidence_level'),
+            'confidence_score': float(finding.get('confidence', 0)),
+            'severity': finding.get('severity'),
+            'user_reason': reason
+        }
+        
+        # Common false positive patterns
+        if 'test' in finding.get('file_path', '').lower():
+            analysis['likely_cause'] = 'test_file'
+        elif finding.get('confidence', 0) < 0.7:
+            analysis['likely_cause'] = 'low_confidence'
+        elif 'example' in finding.get('description', '').lower():
+            analysis['likely_cause'] = 'example_code'
+        else:
+            analysis['likely_cause'] = 'context_misunderstanding'
+        
+        # Generate learning points
+        analysis['learning_points'] = self._generate_learning_points(finding, reason)
+        
+        return analysis
+    
+    def _get_recent_feedback_count(self) -> int:
+        """Get count of recent feedback items"""
+        # In production, query DynamoDB with time filter
+        # Simplified for demo
+        try:
+            response = self.feedback_table.scan(
+                FilterExpression='attribute_not_exists(processed)'
+            )
+            return len(response.get('Items', []))
+        except:
+            return 0
+    
+    def _trigger_learning_job(self):
+        """Trigger asynchronous learning job"""
+        # In production, trigger Step Functions or SageMaker job
+        logger.info("Learning job triggered")
+    
+    def _get_feedback_data(self, time_range: str) -> List[Dict]:
+        """Get feedback data for specified time range"""
+        # Calculate time boundaries
+        end_time = datetime.utcnow()
+        if time_range == 'last_24_hours':
+            start_time = end_time - timedelta(hours=24)
+        elif time_range == 'last_7_days':
+            start_time = end_time - timedelta(days=7)
+        elif time_range == 'last_30_days':
+            start_time = end_time - timedelta(days=30)
+        else:
+            start_time = end_time - timedelta(days=7)
+        
+        # In production, query with time filter
+        # Simplified version
+        feedback_items = []
+        try:
+            response = self.feedback_table.scan()
+            feedback_items = response.get('Items', [])
+        except Exception as e:
+            logger.error(f"Failed to get feedback: {e}")
+        
+        return feedback_items
+    
+    def _calculate_performance_metrics(self, feedback_data: List[Dict]) -> Dict[str, Any]:
+        """Calculate model performance metrics"""
+        
+        total = len(feedback_data)
+        if total == 0:
+            return {
+                'total_feedback': 0,
+                'accuracy': 0,
+                'precision': 0,
+                'recall': 0,
+                'f1_score': 0
+            }
+        
+        # Count validations
+        true_positives = len([f for f in feedback_data if f.get('validation') == 'true_positive'])
+        false_positives = len([f for f in feedback_data if f.get('validation') == 'false_positive'])
+        true_negatives = len([f for f in feedback_data if f.get('validation') == 'true_negative'])
+        false_negatives = len([f for f in feedback_data if f.get('validation') == 'false_negative'])
+        
+        # Calculate metrics
+        accuracy = (true_positives + true_negatives) / total if total > 0 else 0
+        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        return {
+            'total_feedback': total,
+            'true_positives': true_positives,
+            'false_positives': false_positives,
+            'true_negatives': true_negatives,
+            'false_negatives': false_negatives,
+            'accuracy': round(accuracy, 3),
+            'precision': round(precision, 3),
+            'recall': round(recall, 3),
+            'f1_score': round(f1_score, 3),
+            'false_positive_rate': round(false_positives / total if total > 0 else 0, 3)
+        }
+    
+    def _analyze_error_patterns(self, feedback_data: List[Dict]) -> Dict[str, Any]:
+        """Analyze patterns in false positives and negatives"""
+        
+        false_positives = [f for f in feedback_data if f.get('validation') == 'false_positive']
+        false_negatives = [f for f in feedback_data if f.get('validation') == 'false_negative']
+        
+        # Analyze false positive patterns
+        fp_patterns = defaultdict(int)
+        for fp in false_positives:
+            # Get finding details
+            finding_id = fp.get('finding_id')
+            # In production, retrieve finding details
+            fp_patterns['total'] += 1
             
-            effectiveness['true_positive_rate'] = true_positives / total_findings if total_findings > 0 else 0
-            effectiveness['false_positive_rate'] = false_positives / total_findings if total_findings > 0 else 0
+            # Categorize by reason
+            reason = fp.get('reason', 'unknown')
+            if 'test' in reason.lower():
+                fp_patterns['test_code'] += 1
+            elif 'example' in reason.lower():
+                fp_patterns['example_code'] += 1
+            elif 'comment' in reason.lower():
+                fp_patterns['commented_code'] += 1
+            else:
+                fp_patterns['other'] += 1
         
-        # Severity distribution
-        for finding in findings:
-            severity = finding.get('severity', 'MEDIUM')
-            effectiveness['severity_distribution'][severity] += 1
+        # Analyze false negative patterns
+        fn_patterns = defaultdict(int)
+        for fn in false_negatives:
+            fn_patterns['total'] += 1
+            # Would analyze missed vulnerability types
         
-        return effectiveness
+        return {
+            'false_positive_patterns': dict(fp_patterns),
+            'false_negative_patterns': dict(fn_patterns),
+            'top_fp_reasons': self._get_top_reasons(false_positives),
+            'top_fn_types': []  # Would be populated with missed vuln types
+        }
     
-    def _generate_recommendations(self, findings: List[Dict[str, Any]], 
-                                 scan_metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Generate recommendations for future scans"""
+    def _generate_improvement_recommendations(self, metrics: Dict, error_analysis: Dict) -> List[Dict]:
+        """Generate recommendations for model improvement"""
+        
         recommendations = []
         
-        # Analyze finding patterns
-        vuln_types = defaultdict(int)
-        file_types = defaultdict(int)
+        # Check accuracy
+        if metrics['accuracy'] < 0.8:
+            recommendations.append({
+                'priority': 'high',
+                'type': 'accuracy_improvement',
+                'recommendation': 'Consider retraining with more diverse dataset',
+                'expected_impact': 'Improve overall accuracy by 10-15%'
+            })
+        
+        # Check false positive rate
+        if metrics['false_positive_rate'] > 0.2:
+            recommendations.append({
+                'priority': 'high',
+                'type': 'false_positive_reduction',
+                'recommendation': 'Adjust confidence thresholds and add context filters',
+                'expected_impact': 'Reduce false positives by 30-40%'
+            })
+        
+        # Check for specific patterns
+        fp_patterns = error_analysis.get('false_positive_patterns', {})
+        if fp_patterns.get('test_code', 0) > fp_patterns.get('total', 1) * 0.3:
+            recommendations.append({
+                'priority': 'medium',
+                'type': 'pattern_filter',
+                'recommendation': 'Add test file detection and exclusion',
+                'expected_impact': 'Eliminate test file false positives'
+            })
+        
+        # Check recall
+        if metrics['recall'] < 0.7:
+            recommendations.append({
+                'priority': 'high',
+                'type': 'sensitivity_improvement',
+                'recommendation': 'Lower detection thresholds for critical vulnerabilities',
+                'expected_impact': 'Catch 20-30% more real vulnerabilities'
+            })
+        
+        return recommendations
+    
+    def _get_validated_findings(self) -> List[Dict]:
+        """Get findings that have been validated"""
+        validated = []
+        
+        try:
+            # Get feedback with true_positive validation
+            response = self.feedback_table.scan(
+                FilterExpression='validation = :val',
+                ExpressionAttributeValues={':val': 'true_positive'}
+            )
+            
+            for feedback in response.get('Items', []):
+                # Get corresponding finding
+                finding_id = feedback.get('finding_id')
+                finding_response = self.findings_table.get_item(
+                    Key={'finding_id': finding_id}
+                )
+                if 'Item' in finding_response:
+                    validated.append(finding_response['Item'])
+                    
+        except Exception as e:
+            logger.error(f"Failed to get validated findings: {e}")
+        
+        return validated
+    
+    def _extract_patterns(self, findings: List[Dict], pattern_type: str) -> List[Dict]:
+        """Extract patterns from validated findings"""
+        
+        patterns = defaultdict(lambda: {
+            'occurrences': 0,
+            'examples': [],
+            'characteristics': {}
+        })
         
         for finding in findings:
-            vuln_types[finding.get('vulnerability_type', 'UNKNOWN')] += 1
-            file_ext = os.path.splitext(finding.get('file_path', ''))[1]
-            if file_ext:
-                file_types[file_ext] += 1
-        
-        # Recommend focused agents
-        if vuln_types['API_NO_AUTH_ENDPOINT'] > 5:
-            recommendations.append({
-                'type': 'agent_focus',
-                'agent': 'API_SECURITY',
-                'reason': 'High number of API authentication issues detected',
-                'priority': 'high'
-            })
-        
-        if vuln_types['CONTAINER_ROOT_USER'] > 0:
-            recommendations.append({
-                'type': 'agent_addition',
-                'agent': 'CONTAINER_SECURITY',
-                'config': {'deep_scan': True},
-                'reason': 'Container security issues require deeper analysis'
-            })
-        
-        # Recommend scan optimization
-        cost_per_finding = scan_metadata.get('cost_per_finding', 0)
-        if cost_per_finding > 0.50:  # $0.50 per finding threshold
-            recommendations.append({
-                'type': 'optimization',
-                'suggestion': 'Consider using Sub-CEO prioritization for large repositories',
-                'reason': f'High cost per finding: ${cost_per_finding:.2f}'
-            })
-        
-        # File type specific recommendations
-        if file_types.get('.yaml', 0) + file_types.get('.yml', 0) > 10:
-            recommendations.append({
-                'type': 'agent_focus',
-                'agent': 'IAC',
-                'reason': 'Large number of YAML files suggest IaC focus needed'
-            })
-        
-        return recommendations
-    
-    def _update_global_model(self, learnings: Dict[str, Any]):
-        """Update global learning model with new insights"""
-        try:
-            # Store patterns for false positive detection
-            for fp_pattern in learnings['patterns']['false_positives']:
-                pattern_hash = hashlib.md5(
-                    json.dumps(fp_pattern, sort_keys=True).encode()
-                ).hexdigest()
+            if pattern_type == 'vulnerability':
+                # Extract vulnerability patterns
+                pattern_key = f"{finding.get('finding_type')}:{finding.get('severity')}"
+                patterns[pattern_key]['occurrences'] += 1
+                patterns[pattern_key]['examples'].append(finding.get('finding_id'))
                 
-                self.learning_table.put_item(
-                    Item={
-                        'pattern_id': pattern_hash,
-                        'pattern_type': 'false_positive',
-                        'pattern_data': fp_pattern,
-                        'occurrence_count': 1,
-                        'last_seen': datetime.utcnow().isoformat(),
-                        'ttl': int((datetime.utcnow() + timedelta(days=90)).timestamp())
-                    }
+                # Extract characteristics
+                if 'confidence' in finding:
+                    if 'avg_confidence' not in patterns[pattern_key]['characteristics']:
+                        patterns[pattern_key]['characteristics']['avg_confidence'] = []
+                    patterns[pattern_key]['characteristics']['avg_confidence'].append(
+                        float(finding.get('confidence', 0))
+                    )
+        
+        # Convert to list and calculate averages
+        pattern_list = []
+        for key, data in patterns.items():
+            pattern = {
+                'pattern': key,
+                'occurrences': data['occurrences'],
+                'examples': data['examples'][:5],  # Limit examples
+                'characteristics': {}
+            }
+            
+            # Calculate averages
+            for char, values in data['characteristics'].items():
+                if 'avg_' in char and isinstance(values, list):
+                    pattern['characteristics'][char] = sum(values) / len(values)
+            
+            pattern_list.append(pattern)
+        
+        return pattern_list
+    
+    def _generate_pattern_rule(self, pattern: Dict) -> Dict[str, Any]:
+        """Generate detection rule from pattern"""
+        
+        pattern_parts = pattern['pattern'].split(':')
+        finding_type = pattern_parts[0] if pattern_parts else 'unknown'
+        severity = pattern_parts[1] if len(pattern_parts) > 1 else 'MEDIUM'
+        
+        rule = {
+            'rule_id': hashlib.md5(pattern['pattern'].encode()).hexdigest()[:12],
+            'pattern': pattern['pattern'],
+            'finding_type': finding_type,
+            'severity': severity,
+            'confidence_threshold': pattern['characteristics'].get('avg_confidence', 0.7),
+            'min_occurrences': 1,
+            'created_from_learning': True,
+            'created_at': datetime.utcnow().isoformat(),
+            'validation_count': pattern['occurrences']
+        }
+        
+        return rule
+    
+    def _store_patterns(self, patterns: List[Dict]) -> List[str]:
+        """Store learned patterns"""
+        stored = []
+        
+        if MODEL_BUCKET:
+            # Store patterns in S3
+            patterns_key = f"learned-patterns/patterns-{datetime.utcnow().strftime('%Y%m%d')}.json"
+            try:
+                s3_client.put_object(
+                    Bucket=MODEL_BUCKET,
+                    Key=patterns_key,
+                    Body=json.dumps(patterns, indent=2),
+                    ContentType='application/json'
                 )
-            
-            # Store performance benchmarks
-            scan_type = learnings.get('scan_type', 'standard')
-            self.learning_table.put_item(
-                Item={
-                    'pattern_id': f"performance_{scan_type}_{datetime.utcnow().strftime('%Y%m%d')}",
-                    'pattern_type': 'performance',
-                    'metrics': learnings['performance'],
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'ttl': int((datetime.utcnow() + timedelta(days=30)).timestamp())
-                }
-            )
-            
-        except Exception as e:
-            print(f"Error updating global model: {e}")
+                stored.append(patterns_key)
+            except Exception as e:
+                logger.error(f"Failed to store patterns: {e}")
+        
+        return stored
     
-    def get_scan_recommendations(self, repo_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Get recommendations for a new scan based on historical learnings"""
-        recommendations = {
-            'agent_config': {},
-            'scan_optimizations': [],
-            'expected_patterns': []
+    def _update_detection_rules(self, rules: List[Dict]):
+        """Update detection engine with new rules"""
+        # In production, update the detection engine configuration
+        logger.info(f"Updated detection engine with {len(rules)} new rules")
+    
+    def _get_current_thresholds(self) -> Dict[str, float]:
+        """Get current detection thresholds"""
+        # In production, retrieve from configuration
+        return {
+            'confidence': 0.7,
+            'severity_weight': 0.8,
+            'business_risk': 0.6,
+            'false_positive_tolerance': 0.15
+        }
+    
+    def _calculate_optimal_thresholds(self) -> Dict[str, float]:
+        """Calculate optimal thresholds based on feedback"""
+        
+        # Get recent performance metrics
+        feedback_data = self._get_feedback_data('last_30_days')
+        metrics = self._calculate_performance_metrics(feedback_data)
+        
+        current = self._get_current_thresholds()
+        optimal = current.copy()
+        
+        # Adjust based on false positive rate
+        if metrics['false_positive_rate'] > 0.2:
+            # Increase confidence threshold
+            optimal['confidence'] = min(0.9, current['confidence'] + 0.1)
+        elif metrics['false_positive_rate'] < 0.05 and metrics['recall'] < 0.8:
+            # Decrease confidence threshold to catch more
+            optimal['confidence'] = max(0.5, current['confidence'] - 0.1)
+        
+        # Adjust based on accuracy
+        if metrics['accuracy'] < 0.8:
+            optimal['severity_weight'] = min(0.9, current['severity_weight'] + 0.05)
+        
+        return optimal
+    
+    def _validate_threshold_changes(self, current: Dict, new: Dict) -> Dict[str, Any]:
+        """Validate threshold changes are safe"""
+        
+        validation = {
+            'safe_to_apply': True,
+            'warnings': [],
+            'changes': {}
         }
         
-        # Query historical patterns for similar repositories
-        similar_patterns = self._find_similar_scan_patterns(repo_analysis)
-        
-        # Configure agents based on learnings
-        if similar_patterns:
-            # Adjust agent priorities
-            common_vulns = defaultdict(int)
-            for pattern in similar_patterns:
-                for vuln_type in pattern.get('vulnerability_types', []):
-                    common_vulns[vuln_type] += 1
-            
-            # Recommend agent configurations
-            if common_vulns.get('API_NO_AUTH_ENDPOINT', 0) > 3:
-                recommendations['agent_config']['API_SECURITY'] = {
-                    'priority': 'high',
-                    'config': {'deep_scan': True}
+        # Check magnitude of changes
+        for key, current_val in current.items():
+            if key in new:
+                change = abs(new[key] - current_val)
+                validation['changes'][key] = {
+                    'current': current_val,
+                    'new': new[key],
+                    'change': change
                 }
-            
-            if common_vulns.get('SECRETS_HARDCODED', 0) > 5:
-                recommendations['agent_config']['SECRETS'] = {
-                    'priority': 'critical',
-                    'config': {'extended_patterns': True}
-                }
-        
-        # Add optimization recommendations
-        repo_size = repo_analysis.get('total_lines', 0)
-        if repo_size > 100000:
-            recommendations['scan_optimizations'].append({
-                'type': 'use_sub_ceo',
-                'reason': 'Large repository - use Sub-CEO for file prioritization'
-            })
-        
-        # Add expected patterns
-        language_dist = repo_analysis.get('languages', {})
-        if 'Python' in language_dist:
-            recommendations['expected_patterns'].append({
-                'type': 'SAST_PYTHON_SPECIFIC',
-                'likelihood': 'high'
-            })
-        
-        return recommendations
-    
-    def _find_similar_scan_patterns(self, repo_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Find patterns from similar repository scans using Athena"""
-        try:
-            # Extract repository characteristics
-            language = repo_analysis.get('primary_language', 'unknown')
-            repo_size = repo_analysis.get('total_lines', 0)
-            frameworks = repo_analysis.get('frameworks', [])
-            
-            # Build similarity query
-            query = f"""
-            SELECT
-                scan_id,
-                repository_url,
-                repository_analysis,
-                finding_patterns,
-                performance_metrics,
-                scan_date,
-                CAST(
-                    (CASE
-                        WHEN JSON_EXTRACT_SCALAR(repository_analysis, '$.primary_language') = '{language}' THEN 0.3
-                        ELSE 0
-                    END) +
-                    (CASE
-                        WHEN ABS(CAST(JSON_EXTRACT_SCALAR(repository_analysis, '$.total_lines') AS DOUBLE) - {repo_size}) < 5000 THEN 0.2
-                        ELSE 0
-                    END) +
-                    (CASE
-                        WHEN CARDINALITY(ARRAY_INTERSECT(
-                            CAST(JSON_EXTRACT(repository_analysis, '$.frameworks') AS ARRAY<VARCHAR>),
-                            ARRAY{frameworks}
-                        )) > 0 THEN 0.5
-                        ELSE 0
-                    END) AS DOUBLE
-                ) AS similarity_score
-            FROM security_scans
-            WHERE scan_date >= CURRENT_DATE - INTERVAL '90' DAY
-                AND repository_url != '{repo_analysis.get('repository_url', '')}'
-            ORDER BY similarity_score DESC
-            LIMIT 10
-            """
-            
-            # Execute query
-            query_id = self.athena.start_query_execution(
-                QueryString=query,
-                QueryExecutionContext={'Database': self.database_name},
-                ResultConfiguration={'OutputLocation': f's3://{os.environ["FINDINGS_BUCKET"]}/athena-results/'}
-            )['QueryExecutionId']
-            
-            # Wait for query completion
-            max_wait = 30  # seconds
-            start_time = time.time()
-            while time.time() - start_time < max_wait:
-                status = self.athena.get_query_execution(QueryExecutionId=query_id)
-                state = status['QueryExecution']['Status']['State']
                 
-                if state == 'SUCCEEDED':
-                    # Get results
-                    results = self.athena.get_query_results(QueryExecutionId=query_id)
-                    
-                    similar_patterns = []
-                    for row in results['ResultSet']['Rows'][1:]:  # Skip header
-                        data = row['Data']
-                        if len(data) >= 7:
-                            scan_data = {
-                                'scan_id': data[0].get('VarCharValue', ''),
-                                'repository_url': data[1].get('VarCharValue', ''),
-                                'repository_analysis': json.loads(data[2].get('VarCharValue', '{}')),
-                                'finding_patterns': json.loads(data[3].get('VarCharValue', '[]')),
-                                'performance_metrics': json.loads(data[4].get('VarCharValue', '{}')),
-                                'scan_date': data[5].get('VarCharValue', ''),
-                                'similarity_score': float(data[6].get('VarCharValue', '0'))
-                            }
-                            if scan_data['similarity_score'] > 0.3:  # Minimum similarity threshold
-                                similar_patterns.append(scan_data)
-                    
-                    return similar_patterns
-                    
-                elif state in ['FAILED', 'CANCELLED']:
-                    logger.error(f"Query failed: {status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown')}")
-                    break
-                    
-                time.sleep(1)
-            
-            logger.warning("Query timeout - returning empty results")
-            return []
-            
-        except Exception as e:
-            logger.error(f"Error finding similar patterns: {e}")
-            # Fallback to basic pattern matching if Athena fails
-            return self._fallback_pattern_matching(repo_analysis)
-    
-    def _fallback_pattern_matching(self, repo_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Fallback pattern matching when Athena is unavailable"""
-        # Return common patterns based on language/framework
-        language = repo_analysis.get('primary_language', 'unknown').lower()
+                # Warn on large changes
+                if change > 0.2:
+                    validation['warnings'].append(
+                        f"Large change in {key}: {change:.2f}"
+                    )
+                    validation['safe_to_apply'] = False
         
-        common_patterns = {
-            'python': [
-                {
-                    'pattern_type': 'sql_injection',
-                    'detection_rate': 0.15,
-                    'false_positive_rate': 0.05,
-                    'recommended_rules': ['python.lang.security.audit.sqli.flask-mysql-sqli']
-                },
-                {
-                    'pattern_type': 'hardcoded_secrets',
-                    'detection_rate': 0.20,
-                    'false_positive_rate': 0.10,
-                    'recommended_rules': ['generic.secrets.security.detected-aws-key']
-                }
-            ],
-            'javascript': [
-                {
-                    'pattern_type': 'xss',
-                    'detection_rate': 0.25,
-                    'false_positive_rate': 0.08,
-                    'recommended_rules': ['javascript.lang.security.detect-non-literal-regexp']
-                },
-                {
-                    'pattern_type': 'insecure_dependencies',
-                    'detection_rate': 0.30,
-                    'false_positive_rate': 0.02,
-                    'recommended_rules': ['dependency-check']
-                }
-            ],
-            'java': [
-                {
-                    'pattern_type': 'deserialization',
-                    'detection_rate': 0.10,
-                    'false_positive_rate': 0.03,
-                    'recommended_rules': ['java.lang.security.audit.unsafe-deserialization']
-                },
-                {
-                    'pattern_type': 'weak_crypto',
-                    'detection_rate': 0.12,
-                    'false_positive_rate': 0.05,
-                    'recommended_rules': ['java.lang.security.audit.crypto.weak-hash']
-                }
-            ]
+        return validation
+    
+    def _apply_thresholds(self, thresholds: Dict[str, float]):
+        """Apply new detection thresholds"""
+        # In production, update configuration
+        logger.info(f"Applied new thresholds: {thresholds}")
+    
+    def _estimate_threshold_impact(self, current: Dict, new: Dict) -> Dict[str, Any]:
+        """Estimate impact of threshold changes"""
+        
+        impact = {
+            'estimated_fp_change': 0,
+            'estimated_fn_change': 0,
+            'confidence_impact': 'neutral'
         }
         
-        return [{
-            'scan_id': 'fallback',
-            'repository_url': 'common_patterns',
-            'finding_patterns': common_patterns.get(language, []),
-            'similarity_score': 0.5
-        }]
+        # Estimate based on threshold differences
+        confidence_change = new.get('confidence', 0.7) - current.get('confidence', 0.7)
+        
+        if confidence_change > 0:
+            impact['estimated_fp_change'] = -10  # Fewer false positives
+            impact['estimated_fn_change'] = 5   # More false negatives
+            impact['confidence_impact'] = 'stricter'
+        elif confidence_change < 0:
+            impact['estimated_fp_change'] = 10   # More false positives
+            impact['estimated_fn_change'] = -5   # Fewer false negatives
+            impact['confidence_impact'] = 'looser'
+        
+        return impact
     
-    def _load_scan_metadata(self, scan_id: str) -> Dict[str, Any]:
-        """Load scan metadata from DynamoDB"""
-        try:
-            response = self.scan_table.get_item(Key={'scan_id': scan_id})
-            return response.get('Item', {})
-        except Exception as e:
-            print(f"Error loading scan metadata: {e}")
-            return {}
+    def _prepare_training_data(self, config: Dict) -> Dict[str, Any]:
+        """Prepare training dataset"""
+        
+        # Get validated findings
+        validated_findings = self._get_validated_findings()
+        
+        # Get feedback data
+        feedback_data = self._get_feedback_data('last_90_days')
+        
+        # Combine and format for training
+        training_samples = []
+        for feedback in feedback_data:
+            finding_id = feedback.get('finding_id')
+            # Get finding details
+            # Format as training sample
+            sample = {
+                'finding_id': finding_id,
+                'label': feedback.get('validation'),
+                'features': {}  # Would extract features
+            }
+            training_samples.append(sample)
+        
+        # Save training data
+        if TRAINING_BUCKET:
+            dataset_key = f"datasets/security-{datetime.utcnow().strftime('%Y%m%d')}.json"
+            try:
+                s3_client.put_object(
+                    Bucket=TRAINING_BUCKET,
+                    Key=dataset_key,
+                    Body=json.dumps(training_samples),
+                    ContentType='application/json'
+                )
+                dataset_location = f"s3://{TRAINING_BUCKET}/{dataset_key}"
+            except:
+                dataset_location = 'local'
+        else:
+            dataset_location = 'local'
+        
+        return {
+            'dataset_location': dataset_location,
+            'sample_count': len(training_samples),
+            'positive_samples': len([s for s in training_samples if s['label'] == 'true_positive']),
+            'negative_samples': len([s for s in training_samples if s['label'] == 'false_positive'])
+        }
     
-    def _load_scan_findings(self, scan_id: str) -> List[Dict[str, Any]]:
-        """Load aggregated findings from S3"""
-        try:
-            key = f"processed/{scan_id}/aggregated_findings.json"
-            response = s3_client.get_object(Bucket=self.results_bucket, Key=key)
-            data = json.loads(response['Body'].read())
-            return data.get('findings', [])
-        except Exception as e:
-            print(f"Error loading findings: {e}")
-            return []
+    def _get_hyperparameters(self, training_type: str) -> Dict[str, Any]:
+        """Get hyperparameters for training"""
+        
+        if training_type == 'fine_tuning':
+            return {
+                'learning_rate': 0.0001,
+                'batch_size': 16,
+                'epochs': 5,
+                'warmup_steps': 100
+            }
+        else:
+            return {
+                'prompt_optimization': True,
+                'context_window': 4096,
+                'temperature': 0.1
+            }
     
-    def _load_feedback(self, scan_id: str) -> Dict[str, Any]:
-        """Load user feedback on scan results"""
-        try:
-            # Check if feedback exists
-            key = f"feedback/{scan_id}/user_feedback.json"
-            response = s3_client.get_object(Bucket=self.results_bucket, Key=key)
-            return json.loads(response['Body'].read())
-        except:
-            # No feedback available
-            return {}
+    def _simulate_fine_tuning(self, config: Dict) -> Dict[str, Any]:
+        """Simulate fine-tuning process"""
+        # In production, would trigger actual fine-tuning
+        return {
+            'status': 'simulated',
+            'job_id': config['job_name'],
+            'estimated_completion': (datetime.utcnow() + timedelta(hours=2)).isoformat()
+        }
     
-    def _store_learnings(self, scan_id: str, learnings: Dict[str, Any]):
-        """Store learnings in S3 and DynamoDB"""
-        try:
-            # Store detailed learnings in S3
-            key = f"learnings/{scan_id}/scan_learnings.json"
-            s3_client.put_object(
-                Bucket=self.results_bucket,
-                Key=key,
-                Body=json.dumps(learnings, indent=2),
-                ContentType='application/json'
-            )
-            
-            # Store summary in DynamoDB for quick access
-            self.learning_table.put_item(
-                Item={
-                    'pattern_id': f"scan_{scan_id}",
-                    'pattern_type': 'scan_learning',
-                    'scan_id': scan_id,
-                    'effectiveness': learnings['effectiveness'],
-                    'performance': learnings['performance'],
-                    'recommendation_count': len(learnings['recommendations']),
-                    'timestamp': learnings['timestamp'],
-                    'ttl': int((datetime.utcnow() + timedelta(days=365)).timestamp())
-                }
-            )
-        except Exception as e:
-            print(f"Error storing learnings: {e}")
+    def _incremental_learning(self, config: Dict) -> Dict[str, Any]:
+        """Perform incremental learning through prompt optimization"""
+        
+        # Generate optimized prompts based on feedback
+        optimized_prompts = self._generate_optimized_prompts()
+        
+        # Store prompts
+        if MODEL_BUCKET:
+            prompts_key = f"prompts/optimized-{datetime.utcnow().strftime('%Y%m%d')}.json"
+            try:
+                s3_client.put_object(
+                    Bucket=MODEL_BUCKET,
+                    Key=prompts_key,
+                    Body=json.dumps(optimized_prompts),
+                    ContentType='application/json'
+                )
+            except Exception as e:
+                logger.error(f"Failed to store prompts: {e}")
+        
+        return {
+            'status': 'completed',
+            'job_id': config['job_name'],
+            'prompts_updated': len(optimized_prompts)
+        }
+    
+    def _generate_optimized_prompts(self) -> List[Dict[str, str]]:
+        """Generate optimized prompts based on learning"""
+        
+        # Get common false positive patterns
+        feedback_data = self._get_feedback_data('last_30_days')
+        error_analysis = self._analyze_error_patterns(feedback_data)
+        
+        prompts = []
+        
+        # Add context for common false positives
+        if error_analysis['false_positive_patterns'].get('test_code', 0) > 10:
+            prompts.append({
+                'type': 'context_filter',
+                'prompt': "Ignore vulnerabilities in test files or example code unless they demonstrate unsafe patterns that could be copied to production."
+            })
+        
+        if error_analysis['false_positive_patterns'].get('commented_code', 0) > 5:
+            prompts.append({
+                'type': 'context_filter',
+                'prompt': "Do not flag vulnerabilities in commented-out code unless the comments indicate future implementation plans."
+            })
+        
+        return prompts
+    
+    def _save_evaluation(self, evaluation: Dict):
+        """Save model evaluation results"""
+        if MODEL_BUCKET:
+            eval_key = f"evaluations/{evaluation['evaluation_id']}.json"
+            try:
+                s3_client.put_object(
+                    Bucket=MODEL_BUCKET,
+                    Key=eval_key,
+                    Body=json.dumps(evaluation, indent=2),
+                    ContentType='application/json'
+                )
+            except Exception as e:
+                logger.error(f"Failed to save evaluation: {e}")
+    
+    def _get_top_reasons(self, feedback_items: List[Dict]) -> List[Tuple[str, int]]:
+        """Get top reasons for feedback"""
+        reason_counts = defaultdict(int)
+        
+        for item in feedback_items:
+            reason = item.get('reason', 'unspecified')
+            reason_counts[reason] += 1
+        
+        # Sort by count
+        sorted_reasons = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)
+        return sorted_reasons[:5]
+    
+    def _generate_learning_points(self, finding: Dict, reason: str) -> List[str]:
+        """Generate specific learning points from false positive"""
+        
+        learning_points = []
+        
+        # Analyze file path
+        file_path = finding.get('file_path', '')
+        if 'test' in file_path.lower():
+            learning_points.append("Consider file path context - test files have different security requirements")
+        
+        # Analyze confidence
+        if finding.get('confidence', 0) < 0.7:
+            learning_points.append("Low confidence findings need additional validation")
+        
+        # Analyze user reason
+        if reason:
+            if 'example' in reason.lower():
+                learning_points.append("Distinguish between example/documentation code and production code")
+            elif 'false' in reason.lower():
+                learning_points.append("Improve pattern matching to reduce false pattern matches")
+        
+        return learning_points
 
 
 def lambda_handler(event, context):
-    """Lambda handler for learning from results"""
+    """Lambda handler for ML feedback processing"""
+    
+    handler = MLFeedbackHandler()
+    
     try:
-        action = event.get('action', 'learn')
-        
-        engine = LearningEngine()
-        
-        if action == 'learn':
-            # Learn from completed scan
-            scan_id = event['scan_id']
-            learnings = engine.learn_from_scan(scan_id)
+        # Handle different event sources
+        if 'Records' in event:
+            # Process batch feedback from SQS/SNS
+            results = []
+            for record in event['Records']:
+                if 'body' in record:
+                    message = json.loads(record['body'])
+                    result = handler.process_feedback(message)
+                    results.append(result)
             
             return {
                 'statusCode': 200,
-                'body': json.dumps({
-                    'message': 'Learning completed',
-                    'scan_id': scan_id,
-                    'patterns_found': len(learnings['patterns']['false_positives']) + 
-                                    len(learnings['patterns']['true_positives']),
-                    'recommendations': len(learnings['recommendations'])
-                })
+                'processed': len(results),
+                'results': results
             }
-            
-        elif action == 'recommend':
-            # Get recommendations for new scan
-            repo_analysis = event['repo_analysis']
-            recommendations = engine.get_scan_recommendations(repo_analysis)
-            
-            return {
-                'statusCode': 200,
-                'body': json.dumps({
-                    'message': 'Recommendations generated',
-                    'recommendations': recommendations
-                })
-            }
-            
         else:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({
-                    'error': f'Unknown action: {action}'
-                })
-            }
+            # Direct invocation
+            return handler.process_feedback(event)
             
     except Exception as e:
-        print(f"Error in learning engine: {str(e)}")
+        logger.error(f"ML feedback processing failed: {e}", exc_info=True)
         return {
             'statusCode': 500,
-            'body': json.dumps({
-                'error': str(e)
-            })
+            'error': str(e)
         }

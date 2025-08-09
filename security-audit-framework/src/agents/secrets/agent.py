@@ -82,16 +82,105 @@ class SecretsAgent:
     
     def _extract_secrets_findings(self, scan_result) -> List[Dict[str, Any]]:
         """Extract secrets-specific findings from scan result"""
-        # In a real implementation, this would filter findings
-        # For now, return a simplified structure
-        return [
-            {
-                'type': 'exposed_secret',
-                'secret_type': 'api_key',
-                'severity': 'CRITICAL',
-                'description': 'Exposed API key detected'
-            }
-        ]
+        secrets_findings = []
+        
+        # Common secret patterns to look for
+        secret_patterns = {
+            'api_key': ['api_key', 'apikey', 'api-key', 'access_key', 'accesskey'],
+            'private_key': ['private_key', 'privatekey', 'private-key', 'rsa_key', 'ssh_key'],
+            'password': ['password', 'passwd', 'pwd', 'pass', 'secret'],
+            'token': ['token', 'auth_token', 'access_token', 'bearer_token', 'oauth'],
+            'credentials': ['credential', 'creds', 'username', 'user_name'],
+            'database': ['db_password', 'database_url', 'connection_string', 'mongodb_uri'],
+            'aws': ['aws_access_key', 'aws_secret_key', 'aws_session_token'],
+            'github': ['github_token', 'gh_token', 'github_pat'],
+            'slack': ['slack_token', 'slack_webhook'],
+            'stripe': ['stripe_key', 'stripe_secret'],
+            'sendgrid': ['sendgrid_key', 'sendgrid_api'],
+            'twilio': ['twilio_sid', 'twilio_auth'],
+            'firebase': ['firebase_key', 'firebase_config'],
+            'google': ['google_api_key', 'gcp_key', 'service_account']
+        }
+        
+        # Extract findings from scan result
+        if hasattr(scan_result, '__dict__'):
+            # If it's an AIScanResult object
+            scan_dict = scan_result.__dict__
+        else:
+            # If it's already a dict
+            scan_dict = scan_result
+        
+        # Look for secrets in the findings
+        all_findings = scan_dict.get('findings', [])
+        
+        for finding in all_findings:
+            finding_type = finding.get('finding_type', '').lower()
+            description = finding.get('description', '').lower()
+            file_path = finding.get('file_path', '').lower()
+            
+            # Check if this finding is related to secrets
+            is_secret = False
+            detected_secret_type = 'unknown'
+            
+            # Check finding type
+            if any(term in finding_type for term in ['secret', 'credential', 'password', 'token', 'key']):
+                is_secret = True
+            
+            # Check description for secret patterns
+            for secret_type, patterns in secret_patterns.items():
+                if any(pattern in description for pattern in patterns):
+                    is_secret = True
+                    detected_secret_type = secret_type
+                    break
+            
+            # Check if file is likely to contain secrets
+            secret_file_patterns = ['.env', 'config', 'settings', 'credentials', 'secrets']
+            if any(pattern in file_path for pattern in secret_file_patterns):
+                is_secret = True
+            
+            if is_secret:
+                secrets_finding = {
+                    'finding_id': finding.get('finding_id', ''),
+                    'type': 'exposed_secret',
+                    'secret_type': detected_secret_type,
+                    'severity': finding.get('severity', 'HIGH'),
+                    'confidence': finding.get('confidence', 0.8),
+                    'file_path': finding.get('file_path', ''),
+                    'line_numbers': finding.get('line_numbers', []),
+                    'description': finding.get('description', ''),
+                    'remediation': finding.get('remediation', 'Remove hardcoded secrets and use secure secret management'),
+                    'evidence': finding.get('evidence', []),
+                    'business_risk_score': finding.get('business_risk_score', 0.9)
+                }
+                
+                # Enhance remediation based on secret type
+                if detected_secret_type == 'api_key':
+                    secrets_finding['remediation'] = 'Remove API key from code. Use environment variables or AWS Secrets Manager.'
+                elif detected_secret_type == 'password':
+                    secrets_finding['remediation'] = 'Remove hardcoded password. Use secure credential storage like AWS SSM Parameter Store.'
+                elif detected_secret_type == 'private_key':
+                    secrets_finding['remediation'] = 'Remove private key from repository. Use AWS KMS or secure key management service.'
+                elif detected_secret_type == 'database':
+                    secrets_finding['remediation'] = 'Remove database credentials. Use AWS RDS IAM authentication or Secrets Manager.'
+                elif detected_secret_type == 'aws':
+                    secrets_finding['remediation'] = 'Remove AWS credentials. Use IAM roles instead of hardcoded keys.'
+                
+                secrets_findings.append(secrets_finding)
+        
+        # If no secrets found in regular findings, check for secrets-specific detections
+        if not secrets_findings and hasattr(scan_result, 'ai_vulnerabilities'):
+            for vuln in scan_result.ai_vulnerabilities:
+                if any(term in str(vuln).lower() for term in ['secret', 'credential', 'password', 'token', 'key']):
+                    secrets_findings.append({
+                        'type': 'exposed_secret',
+                        'secret_type': 'detected_by_ai',
+                        'severity': 'HIGH',
+                        'confidence': 0.85,
+                        'description': str(vuln),
+                        'remediation': 'Review and remove any hardcoded secrets'
+                    })
+        
+        return secrets_findings
 
 
 def lambda_handler(event, context):

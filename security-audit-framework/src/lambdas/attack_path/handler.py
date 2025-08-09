@@ -1,403 +1,591 @@
 """
-Attack Path Visualization Lambda - Analyzes findings to identify and visualize attack paths
+Attack Path Analysis Lambda - Analyzes potential attack chains in vulnerabilities
 """
 import os
+import sys
 import json
 import boto3
-from typing import Dict, List, Any, Set, Tuple
+import logging
 from datetime import datetime
-import hashlib
+from typing import Dict, List, Any, Tuple, Set
 from collections import defaultdict, deque
+from pathlib import Path
+import networkx as nx
 
-s3_client = boto3.client('s3')
+# Add parent directories to path
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
+from shared.ai_explainability import AIExplainabilityEngine
+from shared.business_context import BusinessContextEngine
+
+# Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# AWS clients
 dynamodb = boto3.resource('dynamodb')
+bedrock_runtime = boto3.client('bedrock-runtime')
+s3_client = boto3.client('s3')
+
+# Environment variables
+FINDINGS_TABLE = os.environ.get('AI_FINDINGS_TABLE', 'SecurityAuditAIFindings')
+RESULTS_BUCKET = os.environ.get('RESULTS_BUCKET')
+MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'anthropic.claude-3-sonnet-20240229-v1:0')
 
 
 class AttackPathAnalyzer:
-    """Analyzes security findings to identify potential attack paths"""
+    """Analyzes attack paths from security findings"""
     
     def __init__(self):
-        self.findings_by_type = defaultdict(list)
-        self.attack_paths = []
-        self.kill_chains = []
-        self.exploitability_scores = {}
+        self.findings_table = dynamodb.Table(FINDINGS_TABLE)
+        self.explainability = AIExplainabilityEngine()
+        self.business_context = BusinessContextEngine()
         
-        # MITRE ATT&CK mapping
-        self.mitre_mapping = {
-            'SECRETS_HARDCODED': ['T1552.001', 'T1078'],  # Unsecured Credentials, Valid Accounts
-            'API_NO_AUTH_ENDPOINT': ['T1190'],  # Exploit Public-Facing Application
-            'CONTAINER_PRIVILEGED': ['T1611', 'T1610'],  # Escape to Host, Deploy Container
-            'K8S_WILDCARD_RBAC': ['T1078.001'],  # Valid Accounts: Default Accounts
-            'IDOR_DIRECT_REFERENCE': ['T1548'],  # Abuse Elevation Control Mechanism
-            'SAST_SQL_INJECTION': ['T1190'],  # Exploit Public-Facing Application
-            'DEPENDENCY_VULNERABLE': ['T1195.001'],  # Supply Chain Compromise
-            'IAC_SECURITY_GROUP_OPEN': ['T1133'],  # External Remote Services
+    def analyze_attack_paths(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Main entry point for attack path analysis"""
+        
+        scan_id = event.get('scan_id')
+        ai_scan_id = event.get('ai_scan_id')
+        
+        if not scan_id and not ai_scan_id:
+            raise ValueError("Either scan_id or ai_scan_id must be provided")
+        
+        # Retrieve findings
+        findings = self._get_findings(ai_scan_id or scan_id)
+        
+        if not findings:
+            return {
+                'scan_id': scan_id,
+                'ai_scan_id': ai_scan_id,
+                'attack_paths': [],
+                'message': 'No findings to analyze'
+            }
+        
+        # Build vulnerability graph
+        vuln_graph = self._build_vulnerability_graph(findings)
+        
+        # Find attack chains
+        attack_paths = self._find_attack_paths(vuln_graph, findings)
+        
+        # Analyze with AI for complex paths
+        enhanced_paths = self._enhance_paths_with_ai(attack_paths, findings)
+        
+        # Calculate risk scores
+        scored_paths = self._calculate_path_risks(enhanced_paths, findings)
+        
+        # Generate remediation priorities
+        remediation_plan = self._generate_remediation_priorities(scored_paths)
+        
+        # Store results
+        results = {
+            'scan_id': scan_id,
+            'ai_scan_id': ai_scan_id,
+            'analysis_timestamp': datetime.utcnow().isoformat(),
+            'total_findings': len(findings),
+            'attack_paths_found': len(scored_paths),
+            'critical_paths': len([p for p in scored_paths if p['risk_score'] >= 0.8]),
+            'attack_paths': scored_paths[:50],  # Top 50 paths
+            'remediation_priorities': remediation_plan,
+            'graph_metrics': self._calculate_graph_metrics(vuln_graph)
         }
         
-    def analyze(self, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Analyze findings to identify attack paths"""
-        # Group findings by type and file
-        self._group_findings(findings)
+        # Save to S3
+        if RESULTS_BUCKET and ai_scan_id:
+            self._save_results(ai_scan_id, results)
         
-        # Identify potential attack chains
-        self._identify_attack_chains()
-        
-        # Calculate exploitability scores
-        self._calculate_exploitability()
-        
-        # Build kill chain visualization
-        self._build_kill_chains()
-        
-        # Create attack graph
-        attack_graph = self._build_attack_graph()
-        
-        return {
-            'attack_paths': self.attack_paths,
-            'kill_chains': self.kill_chains,
-            'attack_graph': attack_graph,
-            'exploitability_scores': self.exploitability_scores,
-            'risk_summary': self._calculate_risk_summary()
-        }
+        return results
     
-    def _group_findings(self, findings: List[Dict[str, Any]]):
-        """Group findings by vulnerability type and location"""
+    def _get_findings(self, scan_id: str) -> List[Dict[str, Any]]:
+        """Retrieve findings from DynamoDB"""
+        findings = []
+        
+        try:
+            # Query using GSI
+            response = self.findings_table.query(
+                IndexName='ScanIndex',
+                KeyConditionExpression='scan_id = :scan_id',
+                ExpressionAttributeValues={':scan_id': scan_id}
+            )
+            
+            findings.extend(response.get('Items', []))
+            
+            # Handle pagination
+            while 'LastEvaluatedKey' in response:
+                response = self.findings_table.query(
+                    IndexName='ScanIndex',
+                    KeyConditionExpression='scan_id = :scan_id',
+                    ExpressionAttributeValues={':scan_id': scan_id},
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                findings.extend(response.get('Items', []))
+                
+        except Exception as e:
+            logger.error(f"Error retrieving findings: {e}")
+        
+        return findings
+    
+    def _build_vulnerability_graph(self, findings: List[Dict[str, Any]]) -> nx.DiGraph:
+        """Build a directed graph of vulnerability relationships"""
+        G = nx.DiGraph()
+        
+        # Add nodes for each finding
         for finding in findings:
-            vuln_type = finding.get('vulnerability_type', 'UNKNOWN')
-            self.findings_by_type[vuln_type].append(finding)
-    
-    def _identify_attack_chains(self):
-        """Identify potential chains of vulnerabilities"""
-        # Common attack patterns
-        attack_patterns = [
-            {
-                'name': 'Credential Theft to Privilege Escalation',
-                'chain': ['SECRETS_HARDCODED', 'API_NO_AUTH_ENDPOINT', 'CONTAINER_PRIVILEGED'],
-                'description': 'Attacker finds hardcoded credentials, accesses unprotected API, gains privileged container access'
-            },
-            {
-                'name': 'Supply Chain to Code Execution',
-                'chain': ['DEPENDENCY_VULNERABLE', 'SAST_CODE_INJECTION', 'CONTAINER_ROOT_USER'],
-                'description': 'Vulnerable dependency exploited to inject code running as root'
-            },
-            {
-                'name': 'IDOR to Data Exfiltration',
-                'chain': ['IDOR_DIRECT_REFERENCE', 'API_NO_AUTH_ENDPOINT', 'IAC_S3_PUBLIC'],
-                'description': 'IDOR vulnerability allows access to sensitive data stored in public S3'
-            },
-            {
-                'name': 'Container Escape to Cloud Takeover',
-                'chain': ['CONTAINER_PRIVILEGED', 'K8S_WILDCARD_RBAC', 'IAC_OVERLY_PERMISSIVE'],
-                'description': 'Privileged container escape leads to Kubernetes cluster compromise'
-            }
-        ]
+            finding_id = finding.get('finding_id')
+            G.add_node(finding_id, **{
+                'type': finding.get('finding_type'),
+                'severity': finding.get('severity'),
+                'file': finding.get('file_path'),
+                'confidence': float(finding.get('confidence', 0.5)),
+                'business_risk': float(finding.get('business_risk_score', 0))
+            })
         
-        for pattern in attack_patterns:
-            # Check if we have findings matching this pattern
-            matching_findings = []
-            for vuln_type in pattern['chain']:
-                if vuln_type in self.findings_by_type:
-                    matching_findings.append({
-                        'type': vuln_type,
-                        'findings': self.findings_by_type[vuln_type][:3]  # Limit to 3 examples
-                    })
+        # Add edges based on relationships
+        for i, finding1 in enumerate(findings):
+            for j, finding2 in enumerate(findings):
+                if i != j:
+                    # Check if vulnerabilities can be chained
+                    if self._can_chain_vulnerabilities(finding1, finding2):
+                        weight = self._calculate_edge_weight(finding1, finding2)
+                        G.add_edge(
+                            finding1['finding_id'],
+                            finding2['finding_id'],
+                            weight=weight
+                        )
+        
+        return G
+    
+    def _can_chain_vulnerabilities(self, vuln1: Dict, vuln2: Dict) -> bool:
+        """Determine if two vulnerabilities can be chained"""
+        
+        # Authentication bypass -> Any other vulnerability
+        if 'auth' in vuln1.get('finding_type', '').lower():
+            return True
+        
+        # SQL Injection -> Data access
+        if 'sql' in vuln1.get('finding_type', '').lower() and \
+           any(term in vuln2.get('finding_type', '').lower() for term in ['data', 'file', 'command']):
+            return True
+        
+        # XSS -> Session hijacking
+        if 'xss' in vuln1.get('finding_type', '').lower() and \
+           any(term in vuln2.get('finding_type', '').lower() for term in ['session', 'auth', 'csrf']):
+            return True
+        
+        # File upload -> Code execution
+        if 'upload' in vuln1.get('finding_type', '').lower() and \
+           any(term in vuln2.get('finding_type', '').lower() for term in ['exec', 'command', 'code']):
+            return True
+        
+        # SSRF -> Internal access
+        if 'ssrf' in vuln1.get('finding_type', '').lower():
+            return True
+        
+        # Same file vulnerabilities
+        if vuln1.get('file_path') == vuln2.get('file_path'):
+            return True
+        
+        # API to API chaining
+        if 'api' in vuln1.get('file_path', '').lower() and \
+           'api' in vuln2.get('file_path', '').lower():
+            return True
+        
+        return False
+    
+    def _calculate_edge_weight(self, vuln1: Dict, vuln2: Dict) -> float:
+        """Calculate the weight of an edge (likelihood of successful chaining)"""
+        weight = 1.0
+        
+        # Factor in severity
+        severity_map = {'CRITICAL': 1.0, 'HIGH': 0.8, 'MEDIUM': 0.5, 'LOW': 0.3}
+        weight *= severity_map.get(vuln1.get('severity', 'MEDIUM'), 0.5)
+        weight *= severity_map.get(vuln2.get('severity', 'MEDIUM'), 0.5)
+        
+        # Factor in confidence
+        weight *= float(vuln1.get('confidence', 0.5))
+        weight *= float(vuln2.get('confidence', 0.5))
+        
+        # Same file bonus
+        if vuln1.get('file_path') == vuln2.get('file_path'):
+            weight *= 1.5
+        
+        return min(weight, 1.0)
+    
+    def _find_attack_paths(self, G: nx.DiGraph, findings: List[Dict]) -> List[Dict[str, Any]]:
+        """Find potential attack paths in the vulnerability graph"""
+        attack_paths = []
+        
+        # Identify entry points (external-facing vulnerabilities)
+        entry_points = self._identify_entry_points(G, findings)
+        
+        # Identify targets (high-value assets)
+        targets = self._identify_targets(G, findings)
+        
+        # Find paths from entry points to targets
+        for entry in entry_points:
+            for target in targets:
+                if entry != target:
+                    try:
+                        # Find all simple paths (to avoid cycles)
+                        paths = list(nx.all_simple_paths(
+                            G, entry, target, cutoff=5
+                        ))
+                        
+                        for path in paths[:10]:  # Limit to 10 paths per pair
+                            attack_paths.append({
+                                'path': path,
+                                'entry_point': entry,
+                                'target': target,
+                                'length': len(path),
+                                'vulnerabilities': [
+                                    self._get_finding_summary(f_id, findings)
+                                    for f_id in path
+                                ]
+                            })
+                    except nx.NetworkXNoPath:
+                        continue
+        
+        # Sort by path length (shorter paths are often more dangerous)
+        attack_paths.sort(key=lambda x: x['length'])
+        
+        return attack_paths
+    
+    def _identify_entry_points(self, G: nx.DiGraph, findings: List[Dict]) -> List[str]:
+        """Identify potential entry points for attackers"""
+        entry_points = []
+        
+        for finding in findings:
+            finding_id = finding.get('finding_id')
+            file_path = finding.get('file_path', '').lower()
+            finding_type = finding.get('finding_type', '').lower()
             
-            if len(matching_findings) >= 2:  # At least 2 steps in the chain found
-                self.attack_paths.append({
-                    'path_id': hashlib.md5(pattern['name'].encode()).hexdigest()[:8],
-                    'name': pattern['name'],
-                    'description': pattern['description'],
-                    'steps': matching_findings,
-                    'likelihood': self._calculate_likelihood(matching_findings),
-                    'impact': self._calculate_impact(pattern['chain'])
-                })
-    
-    def _calculate_exploitability(self):
-        """Calculate exploitability scores for each vulnerability type"""
-        # CVSS-like scoring
-        base_scores = {
-            'CRITICAL': 9.0,
-            'HIGH': 7.5,
-            'MEDIUM': 5.0,
-            'LOW': 2.5,
-            'INFO': 0.5
-        }
+            # External-facing components
+            if any(term in file_path for term in ['api', 'web', 'public', 'endpoint', 'route']):
+                entry_points.append(finding_id)
+            
+            # Authentication/authorization issues
+            elif any(term in finding_type for term in ['auth', 'access', 'permission']):
+                entry_points.append(finding_id)
+            
+            # Input validation issues
+            elif any(term in finding_type for term in ['injection', 'xss', 'input']):
+                entry_points.append(finding_id)
         
-        for vuln_type, findings in self.findings_by_type.items():
-            if findings:
-                # Calculate average severity
-                severities = [f.get('severity', 'MEDIUM') for f in findings]
-                avg_score = sum(base_scores.get(s, 5.0) for s in severities) / len(severities)
+        return entry_points
+    
+    def _identify_targets(self, G: nx.DiGraph, findings: List[Dict]) -> List[str]:
+        """Identify high-value targets"""
+        targets = []
+        
+        for finding in findings:
+            finding_id = finding.get('finding_id')
+            file_path = finding.get('file_path', '').lower()
+            
+            # Database/data access
+            if any(term in file_path for term in ['database', 'db', 'data', 'model']):
+                targets.append(finding_id)
+            
+            # Admin/privileged functions
+            elif any(term in file_path for term in ['admin', 'manage', 'config']):
+                targets.append(finding_id)
+            
+            # Critical business logic
+            elif finding.get('asset_criticality') == 'critical':
+                targets.append(finding_id)
+            
+            # High business risk findings
+            elif float(finding.get('business_risk_score', 0)) > 0.8:
+                targets.append(finding_id)
+        
+        return targets
+    
+    def _enhance_paths_with_ai(self, paths: List[Dict], findings: List[Dict]) -> List[Dict]:
+        """Use AI to analyze and enhance attack paths"""
+        if not paths:
+            return paths
+        
+        # Prepare paths for AI analysis
+        paths_summary = []
+        for i, path in enumerate(paths[:20]):  # Analyze top 20 paths
+            path_desc = {
+                'path_id': i,
+                'steps': [
+                    {
+                        'type': v['type'],
+                        'severity': v['severity'],
+                        'file': v['file']
+                    }
+                    for v in path['vulnerabilities']
+                ]
+            }
+            paths_summary.append(path_desc)
+        
+        prompt = f"""Analyze these potential attack paths and provide insights:
+
+{json.dumps(paths_summary, indent=2)}
+
+For each path, assess:
+1. Likelihood of successful exploitation
+2. Potential impact if exploited
+3. Difficulty for attacker
+4. Detection difficulty
+5. Business impact
+
+Return JSON:
+{{
+  "path_analysis": [
+    {{
+      "path_id": 0,
+      "exploitation_likelihood": "high|medium|low",
+      "potential_impact": "critical|high|medium|low",
+      "attacker_difficulty": "easy|moderate|hard",
+      "detection_difficulty": "easy|moderate|hard",
+      "business_impact": "description",
+      "attack_narrative": "step by step description"
+    }}
+  ]
+}}"""
+
+        try:
+            response = bedrock_runtime.invoke_model(
+                modelId=MODEL_ID,
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4000,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1
+                })
+            )
+            
+            response_body = json.loads(response['body'].read())
+            ai_response = response_body.get('content', [{}])[0].get('text', '{}')
+            
+            # Parse AI response
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', ai_response)
+            if json_match:
+                ai_analysis = json.loads(json_match.group())
                 
-                # Adjust based on confidence
-                confidences = [f.get('confidence', 'MEDIUM') for f in findings]
-                confidence_multiplier = {
-                    'HIGH': 1.0,
-                    'MEDIUM': 0.8,
-                    'LOW': 0.6
+                # Merge AI insights with paths
+                path_lookup = {a['path_id']: a for a in ai_analysis.get('path_analysis', [])}
+                
+                for i, path in enumerate(paths[:20]):
+                    if i in path_lookup:
+                        path['ai_analysis'] = path_lookup[i]
+                        
+        except Exception as e:
+            logger.error(f"AI path analysis failed: {e}")
+        
+        return paths
+    
+    def _calculate_path_risks(self, paths: List[Dict], findings: List[Dict]) -> List[Dict]:
+        """Calculate risk scores for each attack path"""
+        for path in paths:
+            risk_score = 0.0
+            
+            # Base score from path length (shorter = higher risk)
+            risk_score += (1.0 / (path['length'] + 1)) * 0.2
+            
+            # Severity of vulnerabilities in path
+            severity_scores = {'CRITICAL': 1.0, 'HIGH': 0.8, 'MEDIUM': 0.5, 'LOW': 0.3}
+            avg_severity = sum(
+                severity_scores.get(v['severity'], 0.5)
+                for v in path['vulnerabilities']
+            ) / len(path['vulnerabilities'])
+            risk_score += avg_severity * 0.3
+            
+            # Business risk
+            avg_business_risk = sum(
+                v['business_risk'] for v in path['vulnerabilities']
+            ) / len(path['vulnerabilities'])
+            risk_score += avg_business_risk * 0.2
+            
+            # AI assessment if available
+            if 'ai_analysis' in path:
+                ai = path['ai_analysis']
+                likelihood_map = {'high': 1.0, 'medium': 0.6, 'low': 0.3}
+                impact_map = {'critical': 1.0, 'high': 0.8, 'medium': 0.5, 'low': 0.3}
+                
+                risk_score += likelihood_map.get(ai.get('exploitation_likelihood', 'medium'), 0.5) * 0.15
+                risk_score += impact_map.get(ai.get('potential_impact', 'medium'), 0.5) * 0.15
+            
+            path['risk_score'] = min(risk_score, 1.0)
+        
+        # Sort by risk score
+        paths.sort(key=lambda x: x['risk_score'], reverse=True)
+        
+        return paths
+    
+    def _generate_remediation_priorities(self, paths: List[Dict]) -> List[Dict]:
+        """Generate prioritized remediation recommendations"""
+        
+        # Count vulnerability occurrences across paths
+        vuln_impact = defaultdict(lambda: {'count': 0, 'total_risk': 0.0, 'paths': []})
+        
+        for path in paths:
+            for vuln in path['vulnerabilities']:
+                vuln_id = vuln['finding_id']
+                vuln_impact[vuln_id]['count'] += 1
+                vuln_impact[vuln_id]['total_risk'] += path['risk_score']
+                vuln_impact[vuln_id]['paths'].append(path)
+                vuln_impact[vuln_id]['details'] = vuln
+        
+        # Calculate remediation priority
+        priorities = []
+        for vuln_id, impact in vuln_impact.items():
+            priority_score = (
+                impact['total_risk'] * 0.5 +  # Risk contribution
+                (impact['count'] / len(paths)) * 0.3 +  # Frequency
+                severity_scores.get(impact['details']['severity'], 0.5) * 0.2  # Severity
+            )
+            
+            priorities.append({
+                'finding_id': vuln_id,
+                'priority_score': priority_score,
+                'appears_in_paths': impact['count'],
+                'total_risk_contribution': impact['total_risk'],
+                'severity': impact['details']['severity'],
+                'type': impact['details']['type'],
+                'file': impact['details']['file'],
+                'remediation_impact': f"Fixes {impact['count']} attack paths"
+            })
+        
+        # Sort by priority
+        priorities.sort(key=lambda x: x['priority_score'], reverse=True)
+        
+        return priorities[:20]  # Top 20 priorities
+    
+    def _calculate_graph_metrics(self, G: nx.DiGraph) -> Dict[str, Any]:
+        """Calculate graph metrics for the vulnerability network"""
+        return {
+            'total_nodes': G.number_of_nodes(),
+            'total_edges': G.number_of_edges(),
+            'density': nx.density(G),
+            'is_connected': nx.is_weakly_connected(G),
+            'number_of_components': nx.number_weakly_connected_components(G),
+            'average_degree': sum(dict(G.degree()).values()) / G.number_of_nodes() if G.number_of_nodes() > 0 else 0
+        }
+    
+    def _get_finding_summary(self, finding_id: str, findings: List[Dict]) -> Dict:
+        """Get summary of a finding by ID"""
+        for finding in findings:
+            if finding.get('finding_id') == finding_id:
+                return {
+                    'finding_id': finding_id,
+                    'type': finding.get('finding_type'),
+                    'severity': finding.get('severity'),
+                    'file': finding.get('file_path'),
+                    'confidence': float(finding.get('confidence', 0.5)),
+                    'business_risk': float(finding.get('business_risk_score', 0))
                 }
-                avg_confidence = sum(confidence_multiplier.get(c, 0.8) for c in confidences) / len(confidences)
-                
-                # Adjust based on occurrence count
-                occurrence_factor = min(1.0 + (len(findings) * 0.1), 2.0)  # Cap at 2x
-                
-                self.exploitability_scores[vuln_type] = round(avg_score * avg_confidence * occurrence_factor, 2)
+        return {}
     
-    def _build_kill_chains(self):
-        """Build MITRE ATT&CK kill chain visualization"""
-        # Group findings by MITRE tactics
-        tactics_order = [
-            'Initial Access',
-            'Execution',
-            'Persistence',
-            'Privilege Escalation',
-            'Defense Evasion',
-            'Credential Access',
-            'Discovery',
-            'Lateral Movement',
-            'Collection',
-            'Exfiltration',
-            'Impact'
-        ]
-        
-        tactic_mapping = {
-            'T1190': 'Initial Access',  # Exploit Public-Facing Application
-            'T1195.001': 'Initial Access',  # Supply Chain Compromise
-            'T1133': 'Initial Access',  # External Remote Services
-            'T1078': 'Persistence',  # Valid Accounts
-            'T1078.001': 'Persistence',  # Valid Accounts: Default Accounts
-            'T1548': 'Privilege Escalation',  # Abuse Elevation Control Mechanism
-            'T1611': 'Privilege Escalation',  # Escape to Host
-            'T1610': 'Defense Evasion',  # Deploy Container
-            'T1552.001': 'Credential Access',  # Unsecured Credentials
-        }
-        
-        kill_chain_steps = defaultdict(list)
-        
-        for vuln_type, findings in self.findings_by_type.items():
-            if vuln_type in self.mitre_mapping:
-                for technique in self.mitre_mapping[vuln_type]:
-                    if technique in tactic_mapping:
-                        tactic = tactic_mapping[technique]
-                        kill_chain_steps[tactic].append({
-                            'technique': technique,
-                            'vulnerability': vuln_type,
-                            'count': len(findings),
-                            'severity': findings[0].get('severity', 'MEDIUM') if findings else 'MEDIUM'
-                        })
-        
-        # Build ordered kill chain
-        for tactic in tactics_order:
-            if tactic in kill_chain_steps:
-                self.kill_chains.append({
-                    'tactic': tactic,
-                    'techniques': kill_chain_steps[tactic]
-                })
-    
-    def _build_attack_graph(self) -> Dict[str, Any]:
-        """Build a graph representation of attack paths"""
-        nodes = []
-        edges = []
-        node_map = {}
-        
-        # Create nodes for each vulnerability type
-        for i, (vuln_type, findings) in enumerate(self.findings_by_type.items()):
-            node_id = f"node_{i}"
-            node_map[vuln_type] = node_id
-            nodes.append({
-                'id': node_id,
-                'label': vuln_type,
-                'type': 'vulnerability',
-                'count': len(findings),
-                'exploitability': self.exploitability_scores.get(vuln_type, 0),
-                'findings': [f['finding_id'] for f in findings[:5]]  # Sample finding IDs
-            })
-        
-        # Create edges based on attack paths
-        for path in self.attack_paths:
-            steps = path['steps']
-            for i in range(len(steps) - 1):
-                source_type = steps[i]['type']
-                target_type = steps[i + 1]['type']
-                
-                if source_type in node_map and target_type in node_map:
-                    edges.append({
-                        'source': node_map[source_type],
-                        'target': node_map[target_type],
-                        'label': path['name'],
-                        'likelihood': path['likelihood']
-                    })
-        
-        # Add impact nodes
-        impact_types = ['data_breach', 'service_disruption', 'privilege_escalation', 'lateral_movement']
-        for impact in impact_types:
-            impact_node_id = f"impact_{impact}"
-            nodes.append({
-                'id': impact_node_id,
-                'label': impact.replace('_', ' ').title(),
-                'type': 'impact'
-            })
+    def _save_results(self, scan_id: str, results: Dict[str, Any]):
+        """Save attack path analysis results to S3"""
+        try:
+            s3_client.put_object(
+                Bucket=RESULTS_BUCKET,
+                Key=f"attack-paths/{scan_id}/analysis.json",
+                Body=json.dumps(results, indent=2, default=str),
+                ContentType='application/json',
+                ServerSideEncryption='AES256'
+            )
             
-            # Connect high-risk vulnerabilities to impacts
-            for vuln_type, score in self.exploitability_scores.items():
-                if score > 7.0 and vuln_type in node_map:
-                    if (impact == 'data_breach' and 'IDOR' in vuln_type) or \
-                       (impact == 'privilege_escalation' and 'PRIVILEGE' in vuln_type) or \
-                       (impact == 'service_disruption' and 'DOS' in vuln_type):
-                        edges.append({
-                            'source': node_map[vuln_type],
-                            'target': impact_node_id,
-                            'label': 'leads to',
-                            'likelihood': 'high'
-                        })
-        
-        return {
-            'nodes': nodes,
-            'edges': edges,
-            'metadata': {
-                'total_vulnerabilities': len(self.findings_by_type),
-                'total_paths': len(self.attack_paths),
-                'highest_risk_path': max(self.attack_paths, key=lambda p: p['likelihood'])['name'] if self.attack_paths else None
+            # Also save a summary
+            summary = {
+                'scan_id': scan_id,
+                'timestamp': results['analysis_timestamp'],
+                'total_paths': results['attack_paths_found'],
+                'critical_paths': results['critical_paths'],
+                'top_entry_points': self._get_top_entry_points(results['attack_paths']),
+                'top_targets': self._get_top_targets(results['attack_paths']),
+                'remediation_summary': [
+                    {
+                        'finding_id': r['finding_id'],
+                        'priority_score': r['priority_score'],
+                        'impact': r['remediation_impact']
+                    }
+                    for r in results['remediation_priorities'][:5]
+                ]
             }
-        }
+            
+            s3_client.put_object(
+                Bucket=RESULTS_BUCKET,
+                Key=f"attack-paths/{scan_id}/summary.json",
+                Body=json.dumps(summary, indent=2),
+                ContentType='application/json',
+                ServerSideEncryption='AES256'
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to save results: {e}")
     
-    def _calculate_likelihood(self, matching_findings: List[Dict]) -> str:
-        """Calculate likelihood of attack path exploitation"""
-        # Simple heuristic based on number of findings and their severity
-        total_findings = sum(len(mf['findings']) for mf in matching_findings)
+    def _get_top_entry_points(self, paths: List[Dict]) -> List[Dict]:
+        """Get most common entry points"""
+        entry_count = defaultdict(int)
+        entry_details = {}
         
-        if total_findings > 10:
-            return 'very_high'
-        elif total_findings > 5:
-            return 'high'
-        elif total_findings > 2:
-            return 'medium'
-        else:
-            return 'low'
+        for path in paths:
+            entry = path['entry_point']
+            entry_count[entry] += 1
+            if entry not in entry_details:
+                entry_details[entry] = path['vulnerabilities'][0]
+        
+        top_entries = sorted(entry_count.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        return [
+            {
+                'finding_id': entry,
+                'count': count,
+                'type': entry_details[entry]['type'],
+                'file': entry_details[entry]['file']
+            }
+            for entry, count in top_entries
+        ]
     
-    def _calculate_impact(self, chain: List[str]) -> str:
-        """Calculate potential impact of attack chain"""
-        high_impact_vulns = ['CONTAINER_PRIVILEGED', 'K8S_WILDCARD_RBAC', 'SECRETS_HARDCODED', 'DATA_EXPOSURE']
+    def _get_top_targets(self, paths: List[Dict]) -> List[Dict]:
+        """Get most common targets"""
+        target_count = defaultdict(int)
+        target_details = {}
         
-        if any(vuln in chain for vuln in high_impact_vulns):
-            return 'critical'
-        elif len(chain) > 3:
-            return 'high'
-        else:
-            return 'medium'
-    
-    def _calculate_risk_summary(self) -> Dict[str, Any]:
-        """Calculate overall risk summary"""
-        total_exploitability = sum(self.exploitability_scores.values())
-        avg_exploitability = total_exploitability / len(self.exploitability_scores) if self.exploitability_scores else 0
+        for path in paths:
+            target = path['target']
+            target_count[target] += 1
+            if target not in target_details:
+                target_details[target] = path['vulnerabilities'][-1]
         
-        risk_level = 'critical' if avg_exploitability > 8 else \
-                     'high' if avg_exploitability > 6 else \
-                     'medium' if avg_exploitability > 4 else 'low'
+        top_targets = sorted(target_count.items(), key=lambda x: x[1], reverse=True)[:5]
         
-        return {
-            'overall_risk_level': risk_level,
-            'average_exploitability': round(avg_exploitability, 2),
-            'total_attack_paths': len(self.attack_paths),
-            'high_risk_paths': len([p for p in self.attack_paths if p['likelihood'] in ['high', 'very_high']]),
-            'recommendations': self._generate_recommendations()
-        }
-    
-    def _generate_recommendations(self) -> List[str]:
-        """Generate prioritized recommendations"""
-        recommendations = []
-        
-        # Check for critical patterns
-        if 'CONTAINER_PRIVILEGED' in self.findings_by_type:
-            recommendations.append("Remove privileged container configurations immediately")
-        
-        if 'SECRETS_HARDCODED' in self.findings_by_type:
-            recommendations.append("Rotate all hardcoded secrets and implement proper secret management")
-        
-        if 'API_NO_AUTH_ENDPOINT' in self.findings_by_type:
-            recommendations.append("Implement authentication on all API endpoints")
-        
-        if len(self.attack_paths) > 5:
-            recommendations.append("Multiple attack paths detected - implement defense in depth strategy")
-        
-        return recommendations[:5]  # Top 5 recommendations
+        return [
+            {
+                'finding_id': target,
+                'count': count,
+                'type': target_details[target]['type'],
+                'file': target_details[target]['file']
+            }
+            for target, count in top_targets
+        ]
+
+
+# Severity scores for priority calculation
+severity_scores = {'CRITICAL': 1.0, 'HIGH': 0.8, 'MEDIUM': 0.5, 'LOW': 0.3}
 
 
 def lambda_handler(event, context):
-    """Lambda handler for attack path visualization"""
+    """Lambda handler for attack path analysis"""
+    
+    analyzer = AttackPathAnalyzer()
+    
     try:
-        scan_id = event['scan_id']
-        results_bucket = os.environ.get('RESULTS_BUCKET')
-        
-        # Load aggregated findings
-        aggregated_path = f"processed/{scan_id}/aggregated_findings.json"
-        response = s3_client.get_object(Bucket=results_bucket, Key=aggregated_path)
-        aggregated_data = json.loads(response['Body'].read())
-        
-        findings = aggregated_data.get('findings', [])
-        
-        # Analyze attack paths
-        analyzer = AttackPathAnalyzer()
-        attack_analysis = analyzer.analyze(findings)
-        
-        # Add metadata
-        attack_analysis['metadata'] = {
-            'scan_id': scan_id,
-            'analysis_timestamp': datetime.utcnow().isoformat(),
-            'total_findings_analyzed': len(findings),
-            'mitre_techniques_identified': len(set(sum(analyzer.mitre_mapping.values(), [])))
-        }
-        
-        # Store results
-        output_path = f"processed/{scan_id}/attack_paths.json"
-        s3_client.put_object(
-            Bucket=results_bucket,
-            Key=output_path,
-            Body=json.dumps(attack_analysis, indent=2),
-            ContentType='application/json'
-        )
-        
-        # Create visualization data for QuickSight
-        quicksight_data = {
-            'scan_id': scan_id,
-            'timestamp': datetime.utcnow().isoformat(),
-            'risk_level': attack_analysis['risk_summary']['overall_risk_level'],
-            'total_paths': attack_analysis['risk_summary']['total_attack_paths'],
-            'exploitability_scores': attack_analysis['exploitability_scores']
-        }
-        
-        quicksight_path = f"quicksight-data/{scan_id}/attack_visualization.json"
-        s3_client.put_object(
-            Bucket=results_bucket,
-            Key=quicksight_path,
-            Body=json.dumps(quicksight_data),
-            ContentType='application/json'
-        )
+        results = analyzer.analyze_attack_paths(event)
         
         return {
             'statusCode': 200,
-            'body': json.dumps({
-                'message': 'Attack path analysis completed',
-                'scan_id': scan_id,
-                'attack_paths_found': len(attack_analysis['attack_paths']),
-                'risk_level': attack_analysis['risk_summary']['overall_risk_level'],
-                'output_path': f"s3://{results_bucket}/{output_path}"
-            })
+            'body': json.dumps(results, default=str)
         }
         
     except Exception as e:
-        print(f"Error in attack path analysis: {str(e)}")
+        logger.error(f"Attack path analysis failed: {e}", exc_info=True)
         return {
             'statusCode': 500,
-            'body': json.dumps({
-                'error': str(e)
-            })
+            'error': str(e)
         }
-
-
-if __name__ == "__main__":
-    # For testing
-    test_event = {
-        'scan_id': 'test-scan-123'
-    }
-    result = lambda_handler(test_event, None)
-    print(json.dumps(result, indent=2))

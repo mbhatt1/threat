@@ -19,7 +19,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 # Import AI orchestrator and shared modules
 from shared.ai_orchestrator import AISecurityOrchestrator
 from shared.strands import StrandsMessage, MessageType
-from shared.hashiru import HashiruOptimizer
+from shared.hashiru import ExecutionPlanner
 from shared.business_context import BusinessContextEngine
 
 # AWS clients with retry configuration
@@ -72,7 +72,7 @@ class AICEOAgent:
         # Initialize AI components
         self.ai_orchestrator = AISecurityOrchestrator()
         self.business_context = BusinessContextEngine()
-        self.hashiru = HashiruOptimizer()
+        self.hashiru = ExecutionPlanner()
         
         # DynamoDB tables
         self.scan_table = dynamodb.Table(os.environ.get('SCAN_TABLE', 'SecurityScans'))
