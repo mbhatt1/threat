@@ -797,6 +797,77 @@ resource "aws_instance" "test" {
 }}
 '''
     
+    def _handle_tool_creation_request(self, message: StrandsMessage) -> StrandsMessage:
+        """Handle direct tool creation request from another agent"""
+        try:
+            tool_request = message.context.get('tool_request', {})
+            tool_type = tool_request.get('tool_type')
+            tool_spec = tool_request.get('specification', {})
+            training_data = tool_request.get('training_data', [])
+            
+            # Validate request
+            if not tool_type or not tool_spec:
+                return self.protocol.create_error_message(
+                    task_id=message.task_id,
+                    agent_id="AUTONOMOUS",
+                    error="Invalid tool creation request: missing tool_type or specification"
+                )
+            
+            logger.info(f"Processing tool creation request for {tool_type}")
+            
+            # Generate rules based on tool specification
+            patterns = []
+            if training_data:
+                # Use provided training data to extract patterns
+                for example in training_data:
+                    pattern = {
+                        'type': example.get('type', tool_type),
+                        'severity': example.get('severity', 'MEDIUM'),
+                        'description': example.get('description', ''),
+                        'metadata': example.get('metadata', {})
+                    }
+                    patterns.append(pattern)
+            else:
+                # Create patterns from specification
+                pattern = {
+                    'type': tool_type,
+                    'severity': tool_spec.get('default_severity', 'MEDIUM'),
+                    'description': tool_spec.get('description', ''),
+                    'metadata': tool_spec
+                }
+                patterns.append(pattern)
+            
+            # Generate rules for the specified agent type
+            agent_type = tool_spec.get('target_agent', 'ai_code')
+            rules = self.rule_generator.generate_rules(patterns, agent_type)
+            
+            # Validate and deploy
+            validated_rules = self._validate_rules({agent_type: rules})
+            deployed_rules = self._deploy_rules(validated_rules)
+            
+            # Create success response
+            return self.protocol.create_result_message(
+                task_id=message.task_id,
+                agent_id="AUTONOMOUS",
+                results={
+                    'tool_created': True,
+                    'tool_type': tool_type,
+                    'agent_type': agent_type,
+                    'rules_generated': len(rules),
+                    'rules_deployed': deployed_rules.get(agent_type, 0),
+                    'deployed_to': list(deployed_rules.keys())
+                },
+                execution_time=0  # Will be set by protocol
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling tool creation request: {e}")
+            return self.protocol.create_error_message(
+                task_id=message.task_id,
+                agent_id="AUTONOMOUS",
+                error=f"Failed to create tool: {str(e)}"
+            )
+    
     def _deploy_rules(self, rules: Dict[str, List[Dict[str, Any]]]) -> Dict[str, int]:
         """Deploy validated rules to S3 for agents to use"""
         deployed = {}
