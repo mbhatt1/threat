@@ -1,5 +1,5 @@
-# MCP SDK
-mcp>=0.1.0
+# MCP SDK is implemented locally in this directory
+# No external mcp package needed
 
 # AWS SDK
 boto3==1.28.62
