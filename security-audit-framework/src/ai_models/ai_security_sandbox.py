@@ -331,8 +331,10 @@ import traceback
 # Import vulnerable code
 try:
     from vulnerable_code import *
-except:
-    pass
+except ImportError as e:
+    logger.warning(f"Failed to import vulnerable code module: {e}")
+except Exception as e:
+    logger.error(f"Unexpected error importing vulnerable code: {e}")
 
 # Run exploit
 try:
@@ -639,8 +641,10 @@ Provide a brief analysis of what this result means for security."""
             if self.docker_client and 'image_tag' in sandbox_env:
                 try:
                     self.docker_client.images.remove(sandbox_env['image_tag'])
-                except:
-                    pass
+                except docker.errors.ImageNotFound:
+                    logger.debug(f"Docker image {sandbox_env['image_tag']} not found, skipping removal")
+                except Exception as e:
+                    logger.warning(f"Failed to remove Docker image {sandbox_env.get('image_tag', 'unknown')}: {e}")
             
             sandbox_env['status'] = SandboxStatus.DESTROYED
             

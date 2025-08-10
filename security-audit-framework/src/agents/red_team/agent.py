@@ -198,8 +198,9 @@ Format as JSON with 'vulnerabilities' array."""
                             vuln['file'] = file_path
                             vuln['category'] = 'architecture'
                             findings.append(vuln)
-                    except json.JSONDecodeError:
-                        pass
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse AI response as JSON for {file_path}: {e}")
+                        logger.debug(f"Raw AI response: {ai_response[:200]}...")  # Log first 200 chars
                         
                 except Exception as e:
                     logger.error(
@@ -255,8 +256,9 @@ Format as JSON with 'vulnerabilities' array."""
                 for vuln in result.get('vulnerabilities', []):
                     vuln['category'] = 'authentication'
                     findings.append(vuln)
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse business logic AI response as JSON: {e}")
+                logger.debug(f"Raw response: {response[:200]}...")
                 
         except Exception as e:
             logger.error(f"Authentication analysis failed: {e}")
@@ -302,8 +304,10 @@ Format as JSON with 'vulnerabilities' array."""
                                         'implement proper sanitization'
                                     )
                                 })
-                    except:
-                        pass
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse OWASP Top 10 AI response as JSON: {e}")
+                    except Exception as e:
+                        logger.error(f"Unexpected error parsing OWASP response: {e}")
         
         return findings
     
@@ -452,8 +456,9 @@ Format as JSON with 'vulnerabilities' array."""
                                         'environment variables'
                                     )
                                 })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to parse dependency version {dep}: {e}")
+                        # Continue processing other dependencies
         
         return findings
     

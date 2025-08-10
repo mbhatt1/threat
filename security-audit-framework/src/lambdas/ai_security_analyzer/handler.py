@@ -39,7 +39,25 @@ def handler(event, context):
     {
         "action": "analyze_sql|threat_intel|root_cause|pure_ai|sandbox",
         "payload": {
-            ... action-specific data ...
+            # For analyze_sql:
+            "code": "SQL query or code containing SQL",
+            "context": {"language": "python", "framework": "django"}
+            
+            # For threat_intel:
+            "findings": [list of security findings],
+            "repository_path": "path/to/repo"
+            
+            # For root_cause:
+            "incident_id": "incident-123",
+            "incident_data": {incident details}
+            
+            # For pure_ai:
+            "code": "source code to analyze",
+            "context": {"file_path": "path/to/file", "language": "python"}
+            
+            # For sandbox:
+            "vulnerability": {vulnerability details},
+            "test_cases": [list of test cases]
         }
     }
     """

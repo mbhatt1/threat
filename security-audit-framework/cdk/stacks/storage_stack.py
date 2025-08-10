@@ -33,18 +33,65 @@ class StorageStack(Stack):
         )
         
         # Enable S3 Inventory for cost analysis
-        # TODO: Fix inventory configuration for CDK v2
-        # self.results_bucket.add_inventory(
-        #     id="DailyInventory",
-        #     frequency=s3.InventoryFrequency.DAILY,
-        #     include_object_versions=s3.InventoryObjectVersion.CURRENT,
-        #     optional_fields=[
-        #         s3.InventoryOptionalField.SIZE,
-        #         s3.InventoryOptionalField.LAST_MODIFIED_DATE,
-        #         s3.InventoryOptionalField.STORAGE_CLASS,
-        #         s3.InventoryOptionalField.ENCRYPTION_STATUS
-        #     ]
-        # )
+        inventory_bucket = s3.Bucket(
+            self, "InventoryBucket",
+            bucket_name=f"security-scan-inventory-{self.account}-{self.region}",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="DeleteOldInventories",
+                    prefix="inventory/",
+                    expiration=Duration.days(30)
+                )
+            ],
+            removal_policy=RemovalPolicy.DESTROY
+        )
+        
+        # Add inventory configuration
+        inventory = s3.CfnBucket.InventoryConfigurationProperty(
+            id="DailyInventory",
+            enabled=True,
+            destination=s3.CfnBucket.DestinationProperty(
+                bucket_arn=inventory_bucket.bucket_arn,
+                format="CSV",
+                prefix="inventory/"
+            ),
+            schedule_frequency="Daily",
+            included_object_versions="Current",
+            optional_fields=[
+                "Size",
+                "LastModifiedDate",
+                "StorageClass",
+                "ETag",
+                "IsMultipartUploaded",
+                "ReplicationStatus",
+                "EncryptionStatus",
+                "IntelligentTieringAccessTier"
+            ]
+        )
+        
+        # Apply inventory configuration to the results bucket
+        cfn_bucket = self.results_bucket.node.default_child
+        cfn_bucket.add_property_override("InventoryConfigurations", [inventory])
+        
+        # Grant inventory bucket permissions to write inventory data
+        inventory_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
+                actions=["s3:PutObject"],
+                resources=[f"{inventory_bucket.bucket_arn}/*"],
+                conditions={
+                    "StringEquals": {
+                        "s3:x-amz-acl": "bucket-owner-full-control",
+                        "aws:SourceAccount": self.account
+                    },
+                    "ArnLike": {
+                        "aws:SourceArn": self.results_bucket.bucket_arn
+                    }
+                }
+            )
+        )
         
         # DynamoDB table for scan metadata
         self.scan_table = dynamodb.Table(
