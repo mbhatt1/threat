@@ -26,27 +26,53 @@ class IAMStack(Stack):
             ]
         )
         
-        # Add permissions for pulling from ECR
+        # Add permissions for pulling from ECR with specific resources
         self.task_execution_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
-                "ecr:GetAuthorizationToken",
+                "ecr:GetAuthorizationToken"
+            ],
+            resources=["*"]  # GetAuthorizationToken requires wildcard
+        ))
+        
+        self.task_execution_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
                 "ecr:BatchCheckLayerAvailability",
                 "ecr:GetDownloadUrlForLayer",
                 "ecr:BatchGetImage"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:ecr:{self.region}:{self.account}:repository/security-audit/*",
+                f"arn:aws:ecr:{self.region}:{self.account}:repository/cdk-*"
+            ]
         ))
         
-        # EFS permissions for task execution role
+        # EFS permissions for task execution role with specific resources
         self.task_execution_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
                 "elasticfilesystem:ClientMount",
-                "elasticfilesystem:ClientWrite",
+                "elasticfilesystem:ClientWrite"
+            ],
+            resources=[
+                f"arn:aws:elasticfilesystem:{self.region}:{self.account}:file-system/*"
+            ],
+            conditions={
+                "StringEquals": {
+                    "elasticfilesystem:AccessPointArn": f"arn:aws:elasticfilesystem:{self.region}:{self.account}:access-point/*"
+                }
+            }
+        ))
+        
+        self.task_execution_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
                 "elasticfilesystem:DescribeMountTargets"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:elasticfilesystem:{self.region}:{self.account}:file-system/*"
+            ]
         ))
         
         # Autonomous Agent Task Role
@@ -107,7 +133,7 @@ class IAMStack(Stack):
             role.add_to_policy(iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["secretsmanager:GetSecretValue"],
-                resources=["arn:aws:secretsmanager:*:*:secret:git-credentials-*"]
+                resources=[f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:git-credentials-*"]
             ))
         
         # Lambda Role (shared by all Lambda functions)
@@ -138,6 +164,7 @@ class IAMStack(Stack):
         ))
         
         # Cost Explorer and Pricing API access for HASHIRU
+        # Note: Most Cost Explorer APIs require wildcard permissions
         self.lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -152,15 +179,43 @@ class IAMStack(Stack):
                 "ce:GetTags",
                 "pricing:GetProducts",
                 "pricing:DescribeServices",
-                "budgets:DescribeBudget",
-                "budgets:DescribeBudgets",
-                "cloudwatch:GetMetricStatistics",
                 "sts:GetCallerIdentity"
             ],
-            resources=["*"]
+            resources=["*"],  # These services require wildcard
+            conditions={
+                "StringEquals": {
+                    "aws:RequestedRegion": self.region
+                }
+            }
         ))
         
-        # Security Hub access
+        # Budgets access with specific resources
+        self.lambda_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "budgets:DescribeBudget",
+                "budgets:DescribeBudgets"
+            ],
+            resources=[
+                f"arn:aws:budgets::{self.account}:budget/*"
+            ]
+        ))
+        
+        # CloudWatch metrics with specific namespace
+        self.lambda_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "cloudwatch:GetMetricStatistics"
+            ],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "cloudwatch:namespace": ["AWS/Lambda", "AWS/ECS", "AWS/EC2", "AWS/S3"]
+                }
+            }
+        ))
+        
+        # Security Hub access with regional restriction
         self.lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -168,18 +223,38 @@ class IAMStack(Stack):
                 "securityhub:GetFindings",
                 "securityhub:UpdateFindings"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:securityhub:{self.region}:{self.account}:hub/default",
+                f"arn:aws:securityhub:{self.region}:{self.account}:product/*"
+            ]
         ))
         
-        # SNS and SES permissions for notifications
+        # SNS permissions for notifications with specific topics
         self.lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
-                "sns:Publish",
+                "sns:Publish"
+            ],
+            resources=[
+                f"arn:aws:sns:{self.region}:{self.account}:*security*"
+            ]
+        ))
+        
+        # SES permissions for email notifications
+        self.lambda_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
                 "ses:SendEmail",
                 "ses:SendRawEmail"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:ses:{self.region}:{self.account}:identity/*"
+            ],
+            conditions={
+                "StringEquals": {
+                    "ses:FromAddress": "security-scans@example.com"
+                }
+            }
         ))
         
         # QuickSight access
@@ -233,11 +308,14 @@ class IAMStack(Stack):
             ]
         ))
         
-        # Secrets Manager access
+        # Secrets Manager access with specific prefixes
         self.lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=["secretsmanager:GetSecretValue"],
-            resources=["arn:aws:secretsmanager:*:*:secret:*"]
+            resources=[
+                f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:security-audit/*",
+                f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:git-credentials-*"
+            ]
         ))
         
         # AI Security Analyzer Lambda Role
@@ -584,7 +662,10 @@ class IAMStack(Stack):
         self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=["secretsmanager:GetSecretValue"],
-            resources=["arn:aws:secretsmanager:*:*:secret:*"]
+            resources=[
+                f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:git-credentials-*",
+                f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:security-audit/*"
+            ]
         ))
         
         # Aggregator Lambda Role

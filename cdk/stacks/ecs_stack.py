@@ -102,6 +102,63 @@ class EcsStack(Stack):
             }
         )
         
+        # Additional agent images
+        dependency_image = ecr_assets.DockerImageAsset(
+            self, "DependencyImage",
+            directory=os.path.join("..", "src", "agents", "dependency"),
+            build_args={
+                "BUILDKIT_INLINE_CACHE": "1"
+            }
+        )
+        
+        iac_image = ecr_assets.DockerImageAsset(
+            self, "IaCImage",
+            directory=os.path.join("..", "src", "agents", "iac"),
+            build_args={
+                "BUILDKIT_INLINE_CACHE": "1"
+            }
+        )
+        
+        red_team_image = ecr_assets.DockerImageAsset(
+            self, "RedTeamImage",
+            directory=os.path.join("..", "src", "agents", "red_team"),
+            build_args={
+                "BUILDKIT_INLINE_CACHE": "1"
+            }
+        )
+        
+        sast_image = ecr_assets.DockerImageAsset(
+            self, "SASTImage",
+            directory=os.path.join("..", "src", "agents", "sast"),
+            build_args={
+                "BUILDKIT_INLINE_CACHE": "1"
+            }
+        )
+        
+        secrets_image = ecr_assets.DockerImageAsset(
+            self, "SecretsImage",
+            directory=os.path.join("..", "src", "agents", "secrets"),
+            build_args={
+                "BUILDKIT_INLINE_CACHE": "1"
+            }
+        )
+        
+        bedrock_sast_image = ecr_assets.DockerImageAsset(
+            self, "BedrockSASTImage",
+            directory=os.path.join("..", "src", "agents", "bedrock_sast"),
+            build_args={
+                "BUILDKIT_INLINE_CACHE": "1"
+            }
+        )
+        
+        container_scanner_image = ecr_assets.DockerImageAsset(
+            self, "ContainerScannerImage",
+            directory=os.path.join("..", "src", "agents", "autonomous_container_scanner"),
+            build_args={
+                "BUILDKIT_INLINE_CACHE": "1"
+            }
+        )
+        
         # Configure EFS volume for all task definitions
         efs_volume_config = ecs.Volume(
             name="efs-repository",
@@ -363,6 +420,277 @@ class EcsStack(Stack):
             )
         )
         
+        # Dependency Scanner Task Definition
+        self.dependency_task_definition = ecs.FargateTaskDefinition(
+            self, "DependencyTaskDefinition",
+            execution_role=task_execution_role,
+            task_role=autonomous_task_role,
+            cpu=2048,
+            memory_limit_mib=4096,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.X86_64
+            ),
+            volumes=[efs_volume_config]
+        )
+        
+        dependency_container = self.dependency_task_definition.add_container(
+            "dependency-agent",
+            image=ecs.ContainerImage.from_docker_image_asset(dependency_image),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="dependency",
+                log_group=self.log_group
+            ),
+            environment={
+                "RESULTS_BUCKET": results_bucket.bucket_name,
+                "AWS_REGION": self.region,
+                "REPOSITORY_PATH": "/mnt/efs/repos"
+            },
+            memory_limit_mib=4096,
+            cpu=2048
+        )
+        
+        dependency_container.add_mount_points(
+            ecs.MountPoint(
+                container_path="/mnt/efs",
+                source_volume="efs-repository",
+                read_only=True
+            )
+        )
+        
+        # IaC Scanner Task Definition
+        self.iac_task_definition = ecs.FargateTaskDefinition(
+            self, "IaCTaskDefinition",
+            execution_role=task_execution_role,
+            task_role=autonomous_task_role,
+            cpu=1024,
+            memory_limit_mib=2048,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.X86_64
+            ),
+            volumes=[efs_volume_config]
+        )
+        
+        iac_container = self.iac_task_definition.add_container(
+            "iac-agent",
+            image=ecs.ContainerImage.from_docker_image_asset(iac_image),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="iac",
+                log_group=self.log_group
+            ),
+            environment={
+                "RESULTS_BUCKET": results_bucket.bucket_name,
+                "AWS_REGION": self.region,
+                "REPOSITORY_PATH": "/mnt/efs/repos"
+            },
+            memory_limit_mib=2048,
+            cpu=1024
+        )
+        
+        iac_container.add_mount_points(
+            ecs.MountPoint(
+                container_path="/mnt/efs",
+                source_volume="efs-repository",
+                read_only=True
+            )
+        )
+        
+        # Red Team Agent Task Definition
+        self.red_team_task_definition = ecs.FargateTaskDefinition(
+            self, "RedTeamTaskDefinition",
+            execution_role=task_execution_role,
+            task_role=autonomous_task_role,
+            cpu=2048,
+            memory_limit_mib=4096,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.X86_64
+            ),
+            volumes=[efs_volume_config]
+        )
+        
+        red_team_container = self.red_team_task_definition.add_container(
+            "red-team-agent",
+            image=ecs.ContainerImage.from_docker_image_asset(red_team_image),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="red-team",
+                log_group=self.log_group
+            ),
+            environment={
+                "RESULTS_BUCKET": results_bucket.bucket_name,
+                "AWS_REGION": self.region,
+                "REPOSITORY_PATH": "/mnt/efs/repos",
+                "SIMULATION_MODE": "safe"  # Safe mode by default
+            },
+            memory_limit_mib=4096,
+            cpu=2048
+        )
+        
+        red_team_container.add_mount_points(
+            ecs.MountPoint(
+                container_path="/mnt/efs",
+                source_volume="efs-repository",
+                read_only=True
+            )
+        )
+        
+        # SAST Agent Task Definition
+        self.sast_task_definition = ecs.FargateTaskDefinition(
+            self, "SASTTaskDefinition",
+            execution_role=task_execution_role,
+            task_role=autonomous_task_role,
+            cpu=2048,
+            memory_limit_mib=4096,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.X86_64
+            ),
+            volumes=[efs_volume_config]
+        )
+        
+        sast_container = self.sast_task_definition.add_container(
+            "sast-agent",
+            image=ecs.ContainerImage.from_docker_image_asset(sast_image),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="sast",
+                log_group=self.log_group
+            ),
+            environment={
+                "RESULTS_BUCKET": results_bucket.bucket_name,
+                "AWS_REGION": self.region,
+                "REPOSITORY_PATH": "/mnt/efs/repos"
+            },
+            memory_limit_mib=4096,
+            cpu=2048
+        )
+        
+        sast_container.add_mount_points(
+            ecs.MountPoint(
+                container_path="/mnt/efs",
+                source_volume="efs-repository",
+                read_only=True
+            )
+        )
+        
+        # Secrets Scanner Task Definition
+        self.secrets_task_definition = ecs.FargateTaskDefinition(
+            self, "SecretsTaskDefinition",
+            execution_role=task_execution_role,
+            task_role=autonomous_task_role,
+            cpu=1024,
+            memory_limit_mib=2048,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.X86_64
+            ),
+            volumes=[efs_volume_config]
+        )
+        
+        secrets_container = self.secrets_task_definition.add_container(
+            "secrets-agent",
+            image=ecs.ContainerImage.from_docker_image_asset(secrets_image),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="secrets",
+                log_group=self.log_group
+            ),
+            environment={
+                "RESULTS_BUCKET": results_bucket.bucket_name,
+                "AWS_REGION": self.region,
+                "REPOSITORY_PATH": "/mnt/efs/repos",
+                "REMEDIATION_LAMBDA_ARN": remediation_lambda_arn or ""
+            },
+            memory_limit_mib=2048,
+            cpu=1024
+        )
+        
+        secrets_container.add_mount_points(
+            ecs.MountPoint(
+                container_path="/mnt/efs",
+                source_volume="efs-repository",
+                read_only=True
+            )
+        )
+        
+        # Bedrock SAST Task Definition
+        self.bedrock_sast_task_definition = ecs.FargateTaskDefinition(
+            self, "BedrockSASTTaskDefinition",
+            execution_role=task_execution_role,
+            task_role=bedrock_unified_task_role,
+            cpu=4096,
+            memory_limit_mib=8192,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.X86_64
+            ),
+            volumes=[efs_volume_config],
+            ephemeral_storage_gib=100
+        )
+        
+        bedrock_sast_container = self.bedrock_sast_task_definition.add_container(
+            "bedrock-sast-agent",
+            image=ecs.ContainerImage.from_docker_image_asset(bedrock_sast_image),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="bedrock-sast",
+                log_group=self.log_group
+            ),
+            environment={
+                "RESULTS_BUCKET": results_bucket.bucket_name,
+                "AWS_REGION": self.region,
+                "REPOSITORY_PATH": "/mnt/efs/repos",
+                "BEDROCK_MODEL_ID": "anthropic.claude-3-opus-20240229-v1:0"
+            },
+            memory_limit_mib=8192,
+            cpu=4096
+        )
+        
+        bedrock_sast_container.add_mount_points(
+            ecs.MountPoint(
+                container_path="/mnt/efs",
+                source_volume="efs-repository",
+                read_only=True
+            )
+        )
+        
+        # Container Scanner Task Definition
+        self.container_scanner_task_definition = ecs.FargateTaskDefinition(
+            self, "ContainerScannerTaskDefinition",
+            execution_role=task_execution_role,
+            task_role=autonomous_task_role,
+            cpu=2048,
+            memory_limit_mib=4096,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.X86_64
+            ),
+            volumes=[efs_volume_config]
+        )
+        
+        container_scanner_container = self.container_scanner_task_definition.add_container(
+            "container-scanner-agent",
+            image=ecs.ContainerImage.from_docker_image_asset(container_scanner_image),
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="container-scanner",
+                log_group=self.log_group
+            ),
+            environment={
+                "RESULTS_BUCKET": results_bucket.bucket_name,
+                "AWS_REGION": self.region,
+                "REPOSITORY_PATH": "/mnt/efs/repos",
+                "SCAN_REGISTRIES": "ecr,dockerhub"
+            },
+            memory_limit_mib=4096,
+            cpu=2048
+        )
+        
+        container_scanner_container.add_mount_points(
+            ecs.MountPoint(
+                container_path="/mnt/efs",
+                source_volume="efs-repository",
+                read_only=True
+            )
+        )
+        
         # Add health checks to all containers
         all_containers = [
             autonomous_container,
@@ -370,7 +698,14 @@ class EcsStack(Stack):
             autonomous_code_analyzer_container,
             autonomous_threat_intel_container,
             autonomous_infra_security_container,
-            autonomous_supply_chain_container
+            autonomous_supply_chain_container,
+            dependency_container,
+            iac_container,
+            red_team_container,
+            sast_container,
+            secrets_container,
+            bedrock_sast_container,
+            container_scanner_container
         ]
         
         for container in all_containers:

@@ -5,6 +5,7 @@ from aws_cdk import (
     Stack,
     aws_s3 as s3,
     aws_dynamodb as dynamodb,
+    aws_kms as kms,
     RemovalPolicy,
     Duration,
     CfnOutput,
@@ -21,22 +22,38 @@ class StorageStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         
-        # S3 bucket for scan results
+        # Create KMS key for encryption
+        self.kms_key = kms.Key(
+            self, "SecurityAuditKMSKey",
+            description="KMS key for AI Security Audit Framework",
+            enable_key_rotation=True,
+            pending_window=Duration.days(30),
+            alias="alias/security-audit-framework",
+            removal_policy=RemovalPolicy.RETAIN
+        )
+        
+        # Grant CloudWatch Logs access to KMS key
+        self.kms_key.grant_encrypt_decrypt(iam.ServicePrincipal("logs.amazonaws.com"))
+        
+        # S3 bucket for scan results with KMS encryption
         self.results_bucket = s3.Bucket(
             self, "ScanResultsBucket",
             bucket_name=f"security-scan-results-{self.account}-{self.region}",
-            encryption=s3.BucketEncryption.S3_MANAGED,
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.kms_key,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             versioned=True,
             lifecycle_rules=self._create_intelligent_lifecycle_rules(),
-            removal_policy=RemovalPolicy.RETAIN  # Retain bucket on stack deletion
+            removal_policy=RemovalPolicy.RETAIN,  # Retain bucket on stack deletion
+            enforce_ssl=True  # Enforce SSL for all requests
         )
         
-        # Enable S3 Inventory for cost analysis
+        # Enable S3 Inventory for cost analysis with KMS encryption
         inventory_bucket = s3.Bucket(
             self, "InventoryBucket",
             bucket_name=f"security-scan-inventory-{self.account}-{self.region}",
-            encryption=s3.BucketEncryption.S3_MANAGED,
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.kms_key,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             lifecycle_rules=[
                 s3.LifecycleRule(
@@ -45,7 +62,8 @@ class StorageStack(Stack):
                     expiration=Duration.days(30)
                 )
             ],
-            removal_policy=RemovalPolicy.DESTROY
+            removal_policy=RemovalPolicy.DESTROY,
+            enforce_ssl=True
         )
         
         # Add inventory configuration
@@ -93,7 +111,7 @@ class StorageStack(Stack):
             )
         )
         
-        # DynamoDB table for scan metadata
+        # DynamoDB table for scan metadata with KMS encryption
         self.scan_table = dynamodb.Table(
             self, "ScanTable",
             table_name="SecurityScans",
@@ -102,7 +120,8 @@ class StorageStack(Stack):
                 type=dynamodb.AttributeType.STRING
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=self.kms_key,
             point_in_time_recovery=True,
             removal_policy=RemovalPolicy.RETAIN  # Retain table on stack deletion
         )
@@ -136,7 +155,7 @@ class StorageStack(Stack):
             non_key_attributes=["scan_id", "repository_url", "total_findings"]
         )
         
-        # DynamoDB table for agent configurations (optional)
+        # DynamoDB table for agent configurations with KMS encryption
         self.config_table = dynamodb.Table(
             self, "ConfigTable",
             table_name="SecurityAgentConfigs",
@@ -145,11 +164,12 @@ class StorageStack(Stack):
                 type=dynamodb.AttributeType.STRING
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=self.kms_key,
             removal_policy=RemovalPolicy.DESTROY  # Can be recreated
         )
         
-        # DynamoDB table for remediation records
+        # DynamoDB table for remediation records with KMS encryption
         self.remediation_table = dynamodb.Table(
             self, "RemediationTable",
             table_name="SecurityRemediations",
@@ -158,7 +178,8 @@ class StorageStack(Stack):
                 type=dynamodb.AttributeType.STRING
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=self.kms_key,
             point_in_time_recovery=True,
             removal_policy=RemovalPolicy.RETAIN  # Keep remediation records
         )
@@ -652,11 +673,12 @@ class StorageStack(Stack):
             projection_type=dynamodb.ProjectionType.ALL
         )
         
-        # S3 bucket for AI policies
+        # S3 bucket for AI policies with KMS encryption
         self.ai_policies_bucket = s3.Bucket(
             self, "AIPoliciesBucket",
             bucket_name=f"security-audit-policies-{self.account}-{self.region}",
-            encryption=s3.BucketEncryption.S3_MANAGED,
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.kms_key,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             versioned=True,
             lifecycle_rules=[
@@ -665,7 +687,8 @@ class StorageStack(Stack):
                     noncurrent_version_expiration=Duration.days(30)
                 )
             ],
-            removal_policy=RemovalPolicy.RETAIN
+            removal_policy=RemovalPolicy.RETAIN,
+            enforce_ssl=True
         )
         
         # Output AI table names

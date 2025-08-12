@@ -20,7 +20,7 @@ class NetworkStack(Stack):
         self.vpc = ec2.Vpc(
             self, "SecurityAuditVPC",
             max_azs=2,  # Use 2 AZs for HA
-            nat_gateways=1,  # Single NAT Gateway for cost optimization
+            nat_gateways=2,  # Multiple NAT Gateways for high availability
             subnet_configuration=[
                 ec2.SubnetConfiguration(
                     name="Public",
@@ -30,6 +30,11 @@ class NetworkStack(Stack):
                 ec2.SubnetConfiguration(
                     name="Private",
                     subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    cidr_mask=24
+                ),
+                ec2.SubnetConfiguration(
+                    name="Isolated",
+                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
                     cidr_mask=24
                 )
             ],
@@ -44,21 +49,67 @@ class NetworkStack(Stack):
             destination=ec2.FlowLogDestination.to_cloud_watch_logs()
         )
         
-        # Security group for Lambda functions
+        # Security group for Lambda functions with restricted outbound
         self.lambda_security_group = ec2.SecurityGroup(
             self, "LambdaSecurityGroup",
             vpc=self.vpc,
             description="Security group for Lambda functions",
-            allow_all_outbound=True
+            allow_all_outbound=False
         )
         
-        # Security group for ECS tasks
+        # Security group for ECS tasks with restricted outbound
         self.ecs_security_group = ec2.SecurityGroup(
             self, "ECSSecurityGroup",
             vpc=self.vpc,
             description="Security group for ECS tasks",
-            allow_all_outbound=True
+            allow_all_outbound=False
         )
+        
+        # Add specific egress rules for Lambda
+        self.lambda_security_group.add_egress_rule(
+            peer=ec2.Peer.ipv4("10.0.0.0/8"),
+            connection=ec2.Port.tcp(443),
+            description="HTTPS to VPC"
+        )
+        
+        self.lambda_security_group.add_egress_rule(
+            peer=ec2.Peer.prefix_list("pl-02cd2c6b"),  # S3 prefix list for us-east-1
+            connection=ec2.Port.tcp(443),
+            description="HTTPS to S3"
+        )
+        
+        self.lambda_security_group.add_egress_rule(
+            peer=ec2.Peer.ipv4("0.0.0.0/0"),
+            connection=ec2.Port.tcp(443),
+            description="HTTPS to AWS APIs"
+        )
+        
+        # Add specific egress rules for ECS
+        self.ecs_security_group.add_egress_rule(
+            peer=ec2.Peer.ipv4("10.0.0.0/8"),
+            connection=ec2.Port.tcp(443),
+            description="HTTPS to VPC"
+        )
+        
+        self.ecs_security_group.add_egress_rule(
+            peer=ec2.Peer.prefix_list("pl-02cd2c6b"),  # S3 prefix list
+            connection=ec2.Port.tcp(443),
+            description="HTTPS to S3"
+        )
+        
+        self.ecs_security_group.add_egress_rule(
+            peer=ec2.Peer.ipv4("0.0.0.0/0"),
+            connection=ec2.Port.tcp(443),
+            description="HTTPS to AWS APIs and external services"
+        )
+        
+        # Allow DNS resolution
+        for sg in [self.lambda_security_group, self.ecs_security_group]:
+            sg.add_egress_rule(
+                peer=ec2.Peer.ipv4("10.0.0.0/8"),
+                connection=ec2.Port.udp(53),
+                description="DNS resolution"
+            )
         
         # VPC Endpoints for AWS services (cost optimization)
         # S3 Gateway endpoint
@@ -98,6 +149,27 @@ class NetworkStack(Stack):
         self.vpc.add_interface_endpoint(
             "CloudWatchLogsEndpoint",
             service=ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+            private_dns_enabled=True
+        )
+        
+        # Bedrock VPC endpoint for secure AI model access
+        self.vpc.add_interface_endpoint(
+            "BedrockEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.BEDROCK,
+            private_dns_enabled=True
+        )
+        
+        # SSM endpoint for parameter store access
+        self.vpc.add_interface_endpoint(
+            "SSMEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.SSM,
+            private_dns_enabled=True
+        )
+        
+        # KMS endpoint for encryption operations
+        self.vpc.add_interface_endpoint(
+            "KMSEndpoint",
+            service=ec2.InterfaceVpcEndpointAwsService.KMS,
             private_dns_enabled=True
         )
         

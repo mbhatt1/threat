@@ -311,6 +311,74 @@ class LambdaStack(Stack):
         # Note: S3 event notifications should be configured after stack deployment
         # to avoid circular dependencies. Alternatively, use EventBridge rules.
         
+        # Attack Path Analysis Lambda
+        self.attack_path_lambda = lambda_python.PythonFunction(
+            self, "AttackPathLambda",
+            entry=os.path.join("..", "src", "lambdas", "attack_path"),
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.lambda_handler",
+            index="handler.py",
+            role=ai_security_role,  # Reuse AI security role
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[lambda_security_group],
+            environment={
+                **common_env,
+                "BEDROCK_MODEL_ID": "anthropic.claude-3-sonnet-20240229-v1:0",
+                "MAX_PATH_DEPTH": "10"
+            },
+            timeout=Duration.minutes(10),
+            memory_size=1024,
+            layers=[shared_layer],
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+            description="Analyzes potential attack paths from security findings"
+        )
+        
+        # Conditional Trigger Lambda
+        self.conditional_trigger_lambda = lambda_python.PythonFunction(
+            self, "ConditionalTriggerLambda",
+            entry=os.path.join("..", "src", "lambdas", "conditional_trigger"),
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.lambda_handler",
+            index="handler.py",
+            role=lambda_role,  # Use general lambda role
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[lambda_security_group],
+            environment={
+                **common_env,
+                "TRIGGER_RULES_TABLE": "ConditionalTriggerRules"
+            },
+            timeout=Duration.minutes(5),
+            memory_size=512,
+            layers=[shared_layer],
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+            description="Conditionally triggers security scans based on rules"
+        )
+        
+        # Learning Lambda for ML model updates
+        self.learning_lambda = lambda_python.PythonFunction(
+            self, "LearningLambda",
+            entry=os.path.join("..", "src", "lambdas", "learning"),
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.lambda_handler",
+            index="handler.py",
+            role=ai_security_role,  # Needs AI capabilities
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            security_groups=[lambda_security_group],
+            environment={
+                **common_env,
+                "LEARNING_MODEL_BUCKET": results_bucket.bucket_name,
+                "LEARNING_MODEL_PREFIX": "ml-models/",
+                "TRAINING_DATA_TABLE": "SecurityFindingsTraining"
+            },
+            timeout=Duration.minutes(15),
+            memory_size=2048,
+            layers=[shared_layer],
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+            description="Updates ML models based on security findings feedback"
+        )
         
         # SNS Handler Lambda
         self.sns_handler_lambda = lambda_.Function(
