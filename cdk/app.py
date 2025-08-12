@@ -19,6 +19,9 @@ from stacks.security_services_stack import SecurityServicesStack
 from stacks.parameters_stack import ParametersStack
 from stacks.security_hardening_stack import SecurityHardeningStack
 from stacks.certificate_stack import CertificateStack
+from stacks.eventbridge_stack import EventBridgeStack
+from stacks.quicksight_stack import QuickSightStack
+from stacks.athena_stack import AthenaStack
 
 app = cdk.App()
 
@@ -145,6 +148,40 @@ security_services_stack = SecurityServicesStack(
 )
 security_services_stack.add_dependency(storage_stack)
 
+# EventBridge Stack for automated triggers
+eventbridge_stack = EventBridgeStack(
+    app, f"{stack_prefix}-EventBridge",
+    ecr_scanning_lambda=lambda_stack.ecr_scanning_lambda,
+    cloudwatch_insights_lambda=lambda_stack.cloudwatch_insights_lambda,
+    alert_topic=sns_stack.alert_topic,
+    env=env,
+    description="EventBridge rules for automated security scanning triggers"
+)
+eventbridge_stack.add_dependency(lambda_stack)
+eventbridge_stack.add_dependency(sns_stack)
+
+# QuickSight Stack for dashboards
+quicksight_stack = QuickSightStack(
+    app, f"{stack_prefix}-QuickSight",
+    results_bucket=storage_stack.results_bucket,
+    athena_results_bucket=storage_stack.athena_results_bucket,
+    env=env,
+    description="QuickSight configuration for security dashboards"
+)
+quicksight_stack.add_dependency(storage_stack)
+
+# Athena Stack for data analytics
+athena_stack = AthenaStack(
+    app, f"{stack_prefix}-Athena",
+    results_bucket=storage_stack.results_bucket,
+    athena_results_bucket=storage_stack.athena_results_bucket,
+    athena_setup_lambda=lambda_stack.athena_setup_lambda,
+    env=env,
+    description="Athena configuration for security scan analysis"
+)
+athena_stack.add_dependency(storage_stack)
+athena_stack.add_dependency(lambda_stack)
+
 # Step Functions for workflow orchestration
 step_function_stack = StepFunctionStack(
     app, f"{stack_prefix}-StepFunctions",
@@ -227,7 +264,8 @@ monitoring_stack = MonitoringStack(
         "athena_setup": lambda_stack.athena_setup_lambda,
         "data_transformer": lambda_stack.data_transformer_lambda,
         "ai_security_analyzer": lambda_stack.ai_security_analyzer_lambda,
-        "sns_handler": lambda_stack.sns_handler_lambda
+        "sns_handler": lambda_stack.sns_handler_lambda,
+        "ecr_scanning": lambda_stack.ecr_scanning_lambda
     },
     tables={
         "scan": storage_stack.scan_table,
@@ -316,7 +354,8 @@ security_hardening_stack.add_dependency(storage_stack)
 for stack in [network_stack, storage_stack, iam_stack, lambda_stack,
               ecs_stack, step_function_stack, api_stack, sns_stack,
               monitoring_stack, bedrock_stack, security_services_stack,
-              parameters_stack, security_hardening_stack]:
+              parameters_stack, security_hardening_stack, eventbridge_stack,
+              quicksight_stack, athena_stack]:
     cdk.Tags.of(stack).add("Project", "AISecurityAudit")
     cdk.Tags.of(stack).add("Environment", os.getenv("ENVIRONMENT", "dev"))
     cdk.Tags.of(stack).add("ManagedBy", "CDK")

@@ -394,6 +394,151 @@ class SecurityServicesStack(Stack):
             )
         )
         
+        # AWS Security Lake Configuration
+        # Security Lake centralizes security data from AWS services
+        self.security_lake_bucket = s3.Bucket(
+            self, "SecurityLakeBucket",
+            bucket_name=f"aws-security-data-lake-{self.region}-{self.account}",
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.cloudtrail_key,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            versioned=True,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="SecurityLakeRetention",
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.INFREQUENT_ACCESS,
+                            transition_after=Duration.days(30)
+                        ),
+                        s3.Transition(
+                            storage_class=s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+                            transition_after=Duration.days(90)
+                        ),
+                        s3.Transition(
+                            storage_class=s3.StorageClass.DEEP_ARCHIVE,
+                            transition_after=Duration.days(180)
+                        )
+                    ],
+                    expiration=Duration.days(730)  # 2 years retention
+                )
+            ],
+            removal_policy=RemovalPolicy.RETAIN
+        )
+        
+        # Grant permissions for Security Lake
+        self.security_lake_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                principals=[
+                    iam.ServicePrincipal("securitylake.amazonaws.com")
+                ],
+                actions=[
+                    "s3:GetBucketLocation",
+                    "s3:ListBucket",
+                    "s3:PutObject",
+                    "s3:PutObjectAcl"
+                ],
+                resources=[
+                    self.security_lake_bucket.bucket_arn,
+                    f"{self.security_lake_bucket.bucket_arn}/*"
+                ],
+                conditions={
+                    "StringEquals": {
+                        "aws:SourceAccount": self.account
+                    }
+                }
+            )
+        )
+        
+        # Create Security Lake data sources configuration
+        # This creates event rules to forward security events to Security Lake
+        security_lake_events = [
+            {
+                "source": "aws.cloudtrail",
+                "detail_type": ["AWS API Call via CloudTrail"],
+                "description": "CloudTrail events"
+            },
+            {
+                "source": "aws.guardduty",
+                "detail_type": ["GuardDuty Finding"],
+                "description": "GuardDuty findings"
+            },
+            {
+                "source": "aws.securityhub",
+                "detail_type": ["Security Hub Findings - Imported"],
+                "description": "Security Hub findings"
+            },
+            {
+                "source": "aws.config",
+                "detail_type": ["Config Rules Compliance Change"],
+                "description": "AWS Config compliance changes"
+            },
+            {
+                "source": "aws.access-analyzer",
+                "detail_type": ["Access Analyzer Finding"],
+                "description": "IAM Access Analyzer findings"
+            },
+            {
+                "source": "aws.macie",
+                "detail_type": ["Macie Finding"],
+                "description": "Macie findings"
+            }
+        ]
+        
+        # Create EventBridge rules to forward events to Security Lake
+        for event_config in security_lake_events:
+            rule = events.Rule(
+                self, f"SecurityLake{event_config['source'].replace('.', '-').title()}Rule",
+                rule_name=f"security-lake-{event_config['source'].replace('.', '-')}",
+                description=f"Forward {event_config['description']} to Security Lake",
+                event_pattern=events.EventPattern(
+                    source=[event_config["source"]],
+                    detail_type=event_config["detail_type"]
+                )
+            )
+            
+            # Add S3 target for Security Lake
+            rule.add_target(
+                events_targets.SfnStateMachine(
+                    # This would normally be the Security Lake ingestion state machine
+                    # For now, we'll write directly to S3
+                    events_targets.LambdaFunction(
+                        security_lake_lambda
+                    ) if security_lake_lambda else None
+                )
+            )
+        
+        # Create Lambda execution role for Security Lake processing
+        self.security_lake_role = iam.Role(
+            self, "SecurityLakeProcessingRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            ]
+        )
+        
+        # Grant permissions to write to Security Lake bucket
+        self.security_lake_bucket.grant_write(self.security_lake_role)
+        self.cloudtrail_key.grant_encrypt_decrypt(self.security_lake_role)
+        
+        # Add policy for reading from various security services
+        self.security_lake_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "guardduty:ListFindings",
+                    "guardduty:GetFindings",
+                    "securityhub:GetFindings",
+                    "config:DescribeComplianceByConfigRule",
+                    "config:GetComplianceDetailsByConfigRule",
+                    "access-analyzer:ListFindings",
+                    "macie2:ListFindings",
+                    "cloudtrail:LookupEvents",
+                    "events:PutEvents"
+                ],
+                resources=["*"]
+            )
+        )
+        
         # AWS Shield Advanced Configuration
         # NOTE: Shield Advanced has a monthly cost of $3000 USD plus data transfer fees
         # Only enable if you need advanced DDoS protection

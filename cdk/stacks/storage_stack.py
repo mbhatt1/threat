@@ -309,6 +309,36 @@ class StorageStack(Stack):
             point_in_time_recovery=True
         )
         
+        # Create metrics bucket for AI explainability
+        self.metrics_bucket = s3.Bucket(
+            self, "MetricsBucket",
+            bucket_name=f"security-audit-metrics-{self.account}-{self.region}",
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.kms_key,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            versioned=True,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="DeleteOldMetrics",
+                    expiration=Duration.days(90),
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.INFREQUENT_ACCESS,
+                            transition_after=Duration.days(30)
+                        ),
+                        s3.Transition(
+                            storage_class=s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+                            transition_after=Duration.days(60)
+                        )
+                    ]
+                )
+            ],
+            removal_policy=RemovalPolicy.RETAIN,
+            enforce_ssl=True,
+            server_access_logs_bucket=self.access_logs_bucket,
+            server_access_logs_prefix="metrics-bucket/"
+        )
+        
         # AI-Powered Tables
         self._create_ai_tables()
         

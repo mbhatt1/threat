@@ -15,6 +15,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 # Import CLI modules
 from cli.secure_archive_cli import cli as secure_archive_cli
 from cli.secure_archive_kms_cli import cli as secure_archive_kms_cli
+from cli.security_audit_cli import configure, validate, report as audit_report, remediate, scan as audit_scan
 
 console = Console()
 
@@ -88,23 +89,23 @@ def list(all, status):
     console.print(table)
 
 
-@cli.group()
-def report():
-    """Generate and manage reports"""
+@cli.group(name='legacy-report')
+def legacy_report():
+    """Generate and manage reports (legacy)"""
     pass
 
 
-@report.command()
+@legacy_report.command()
 @click.option('--scan-id', '-s', help='Scan ID to generate report for')
-@click.option('--format', '-f', type=click.Choice(['json', 'html', 'pdf', 'executive']), 
+@click.option('--format', '-f', type=click.Choice(['json', 'html', 'pdf', 'executive']),
               default='html', help='Report format')
 @click.option('--output', '-o', help='Output file path')
 def generate(scan_id, format, output):
-    """Generate security report"""
+    """Generate security report (legacy)"""
     console.print(f"[cyan]Generating {format} report...[/cyan]")
     
-    # TODO: Implement report generation
-    console.print("[yellow]Report generation not yet implemented[/yellow]")
+    # This is the legacy report generation - use 'audit-report' for the new implementation
+    console.print("[yellow]Legacy report generation - use 'audit-report' command instead[/yellow]")
 
 
 @cli.group()
@@ -144,6 +145,13 @@ def aws(environment, region, profile):
 cli.add_command(secure_archive_cli, name='archive')
 cli.add_command(secure_archive_kms_cli, name='archive-kms')
 
+# Add the new security audit commands
+cli.add_command(configure, name='configure')
+cli.add_command(validate, name='validate')
+cli.add_command(audit_report, name='audit-report')
+cli.add_command(remediate, name='remediate')
+cli.add_command(audit_scan, name='audit-scan')
+
 
 @cli.command()
 @click.option('--check', is_flag=True, help='Check configuration')
@@ -160,6 +168,8 @@ def config(check):
             ('ARCHIVE_S3_BUCKET', 'Archive S3 bucket'),
             ('BEDROCK_MODEL_ID', 'Bedrock model ID'),
             ('LOG_LEVEL', 'Logging level'),
+            ('SECURITY_API_ENDPOINT', 'Security API endpoint'),
+            ('SECURITY_API_TOKEN', 'Security API token'),
         ]
         
         from rich.table import Table
@@ -174,10 +184,15 @@ def config(check):
             value = os.environ.get(var, '')
             status = '✓' if value else '✗'
             status_color = 'green' if value else 'red'
+            # Mask sensitive values
+            if 'TOKEN' in var or 'KEY' in var:
+                display_value = '***' if value else ''
+            else:
+                display_value = value[:20] + '...' if len(value) > 20 else value
             table.add_row(
-                var, 
-                desc, 
-                value[:20] + '...' if len(value) > 20 else value,
+                var,
+                desc,
+                display_value,
                 f'[{status_color}]{status}[/{status_color}]'
             )
         

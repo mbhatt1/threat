@@ -1,499 +1,615 @@
+#!/usr/bin/env python3
 """
-AI-Powered Security Audit CLI
-Developer-friendly command-line interface for local AI security scanning
+AI Security Audit CLI - Main command line interface
 """
 import click
 import json
-import sys
 import os
+import sys
+import boto3
+import requests
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-import subprocess
+from typing import Dict, Any, List, Optional
 from rich.console import Console
 from rich.table import Table
+from rich.prompt import Prompt, Confirm
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.panel import Panel
-from rich.syntax import Syntax
-from rich.markdown import Markdown
-import asyncio
-
-# Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
-
-from shared.ai_orchestrator import AISecurityOrchestrator, run_ai_scan
-from shared.incremental_scanner import IncrementalScanner
-from shared.ai_explainability import AIExplainabilityEngine
-from shared.advanced_features import AISecurityFeatures
+import yaml
 
 console = Console()
 
-class AISecurityCLI:
-    """AI-powered security scanning CLI"""
+
+class SecurityAuditCLI:
+    """Main CLI for AI Security Audit Framework"""
     
     def __init__(self):
-        self.orchestrator = None
-        self.scanner = IncrementalScanner()
-        self.explainability = AIExplainabilityEngine()
-        self.ai_features = AISecurityFeatures()
-    
-    def scan(self, 
-             path: str = ".",
-             scan_type: str = "incremental",
-             output_format: str = "terminal",
-             include_suppressed: bool = False,
-             fix: bool = False,
-             explain: bool = True) -> int:
-        """
-        Run AI-powered security scan
+        self.console = Console()
+        self.config_path = Path.home() / '.security' / 'config.json'
+        self.api_endpoint = os.environ.get('SECURITY_API_ENDPOINT', '')
+        self.api_token = os.environ.get('SECURITY_API_TOKEN', '')
         
-        Args:
-            path: Path to scan (default: current directory)
-            scan_type: Type of scan (full, incremental, pr)
-            output_format: Output format (terminal, json, sarif, markdown)
-            include_suppressed: Include suppressed findings
-            fix: Attempt to auto-fix issues
-            explain: Show AI explanations
-            
-        Returns:
-            Exit code (0 for success, 1 for findings, 2 for errors)
-        """
+    def load_config(self) -> Dict[str, Any]:
+        """Load configuration from file"""
+        if self.config_path.exists():
+            with open(self.config_path, 'r') as f:
+                return json.load(f)
+        return {}
+    
+    def save_config(self, config: Dict[str, Any]):
+        """Save configuration to file"""
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+
+
+@click.group()
+@click.version_option(version='1.0.0', prog_name='AI Security Audit')
+def cli():
+    """AI Security Audit Framework CLI"""
+    pass
+
+
+@cli.command()
+@click.option('--interactive/--no-interactive', default=True, help='Run in interactive mode')
+@click.option('--api-endpoint', help='API endpoint URL')
+@click.option('--api-token', help='API authentication token')
+@click.option('--aws-region', help='AWS region')
+@click.option('--output', '-o', type=click.Path(), help='Output configuration file')
+def configure(interactive, api_endpoint, api_token, aws_region, output):
+    """Setup wizard for AI Security Audit Framework"""
+    cli_handler = SecurityAuditCLI()
+    config = cli_handler.load_config()
+    
+    console.print("[bold cyan]AI Security Audit Configuration[/bold cyan]\n")
+    
+    if interactive:
+        # API Configuration
+        console.print("[yellow]API Configuration[/yellow]")
+        api_endpoint = Prompt.ask(
+            "API Endpoint URL",
+            default=config.get('api', {}).get('endpoint', api_endpoint or '')
+        )
+        
+        api_token = Prompt.ask(
+            "API Authentication Token",
+            password=True,
+            default=config.get('api', {}).get('auth_token', api_token or '')
+        )
+        
+        # AWS Configuration
+        console.print("\n[yellow]AWS Configuration[/yellow]")
+        aws_region = Prompt.ask(
+            "AWS Region",
+            default=config.get('aws', {}).get('region', aws_region or 'us-east-1')
+        )
+        
+        # Scanning Configuration
+        console.print("\n[yellow]Scanning Configuration[/yellow]")
+        default_priority = Prompt.ask(
+            "Default scan priority",
+            choices=['low', 'normal', 'high', 'critical'],
+            default=config.get('scanning', {}).get('default_priority', 'normal')
+        )
+        
+        parallel_agents = Prompt.ask(
+            "Number of parallel agents",
+            default=str(config.get('scanning', {}).get('parallel_agents', 5))
+        )
+        
+        # Agent Configuration
+        console.print("\n[yellow]Agent Configuration[/yellow]")
+        enable_sast = Confirm.ask("Enable SAST agent?", default=True)
+        enable_dependency = Confirm.ask("Enable dependency scanning?", default=True)
+        enable_secrets = Confirm.ask("Enable secrets scanning?", default=True)
+        enable_iac = Confirm.ask("Enable IaC scanning?", default=True)
+        enable_container = Confirm.ask("Enable container scanning?", default=True)
+        
+        # AI Features
+        console.print("\n[yellow]AI Features[/yellow]")
+        enable_ai = Confirm.ask("Enable AI-powered features?", default=True)
+        auto_remediation = Confirm.ask("Enable auto-remediation?", default=False)
+        
+        # Integration Configuration
+        console.print("\n[yellow]Integrations[/yellow]")
+        enable_slack = Confirm.ask("Enable Slack notifications?", default=False)
+        slack_webhook = ""
+        if enable_slack:
+            slack_webhook = Prompt.ask("Slack webhook URL", password=True)
+        
+        enable_teams = Confirm.ask("Enable Teams notifications?", default=False)
+        teams_webhook = ""
+        if enable_teams:
+            teams_webhook = Prompt.ask("Teams webhook URL", password=True)
+    
+    # Build configuration
+    config = {
+        "version": "1.0.0",
+        "api": {
+            "endpoint": api_endpoint,
+            "auth_token": api_token,
+            "timeout": 300,
+            "retry_attempts": 3
+        },
+        "aws": {
+            "region": aws_region
+        },
+        "scanning": {
+            "default_priority": default_priority if interactive else "normal",
+            "parallel_agents": int(parallel_agents) if interactive else 5
+        },
+        "agents": {
+            "sast": {"enabled": enable_sast if interactive else True},
+            "dependency": {"enabled": enable_dependency if interactive else True},
+            "secrets": {"enabled": enable_secrets if interactive else True},
+            "iac": {"enabled": enable_iac if interactive else True},
+            "container": {"enabled": enable_container if interactive else True}
+        },
+        "ai_features": {
+            "enabled": enable_ai if interactive else True,
+            "auto_remediation": auto_remediation if interactive else False
+        },
+        "integrations": {
+            "slack": {
+                "enabled": enable_slack if interactive else False,
+                "webhook_url": slack_webhook if interactive else ""
+            },
+            "teams": {
+                "enabled": enable_teams if interactive else False,
+                "webhook_url": teams_webhook if interactive else ""
+            }
+        }
+    }
+    
+    # Save configuration
+    if output:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        console.print(f"\n[green]✓ Configuration saved to {output_path}[/green]")
+    else:
+        cli_handler.save_config(config)
+        console.print(f"\n[green]✓ Configuration saved to {cli_handler.config_path}[/green]")
+    
+    # Set environment variables
+    os.environ['SECURITY_API_ENDPOINT'] = api_endpoint
+    os.environ['SECURITY_API_TOKEN'] = api_token
+    os.environ['AWS_DEFAULT_REGION'] = aws_region
+    
+    console.print("\n[bold green]Configuration complete![/bold green]")
+    console.print("Run 'ai-security validate' to verify your configuration.")
+
+
+@cli.command()
+@click.option('--config', '-c', type=click.Path(exists=True), help='Configuration file path')
+@click.option('--verbose', '-v', is_flag=True, help='Verbose output')
+def validate(config, verbose):
+    """Pre-flight checks for AI Security Audit"""
+    cli_handler = SecurityAuditCLI()
+    
+    if config:
+        with open(config, 'r') as f:
+            configuration = json.load(f)
+    else:
+        configuration = cli_handler.load_config()
+    
+    console.print("[bold cyan]AI Security Audit Validation[/bold cyan]\n")
+    
+    checks = []
+    
+    # Check configuration file
+    config_exists = cli_handler.config_path.exists() or config
+    checks.append(("Configuration file", config_exists, "Required"))
+    
+    # Check API connectivity
+    api_endpoint = configuration.get('api', {}).get('endpoint', '')
+    api_token = configuration.get('api', {}).get('auth_token', '')
+    api_connected = False
+    
+    if api_endpoint and api_token:
         try:
-            # Validate path
-            scan_path = Path(path).resolve()
-            if not scan_path.exists():
-                console.print(f"[red]Error: Path '{path}' does not exist[/red]")
-                return 2
+            response = requests.get(
+                f"{api_endpoint}/health",
+                headers={"Authorization": f"Bearer {api_token}"},
+                timeout=5
+            )
+            api_connected = response.status_code == 200
+        except:
+            api_connected = False
+    
+    checks.append(("API connectivity", api_connected, "Required"))
+    
+    # Check AWS credentials
+    aws_configured = False
+    try:
+        session = boto3.Session()
+        sts = session.client('sts')
+        sts.get_caller_identity()
+        aws_configured = True
+    except:
+        aws_configured = False
+    
+    checks.append(("AWS credentials", aws_configured, "Required"))
+    
+    # Check AWS services
+    if aws_configured:
+        try:
+            # Check S3
+            s3 = boto3.client('s3')
+            s3.list_buckets()
+            checks.append(("S3 access", True, "Required"))
+        except:
+            checks.append(("S3 access", False, "Required"))
+        
+        try:
+            # Check DynamoDB
+            dynamodb = boto3.client('dynamodb')
+            dynamodb.list_tables()
+            checks.append(("DynamoDB access", True, "Required"))
+        except:
+            checks.append(("DynamoDB access", False, "Required"))
+        
+        try:
+            # Check Lambda
+            lambda_client = boto3.client('lambda')
+            lambda_client.list_functions(MaxItems=1)
+            checks.append(("Lambda access", True, "Required"))
+        except:
+            checks.append(("Lambda access", False, "Required"))
+    
+    # Check agents configuration
+    agents = configuration.get('agents', {})
+    enabled_agents = [k for k, v in agents.items() if v.get('enabled', False)]
+    checks.append(("Enabled agents", len(enabled_agents) > 0, "Required"))
+    
+    # Display results
+    table = Table(title="Validation Results")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status", style="white")
+    table.add_column("Requirement", style="yellow")
+    
+    all_passed = True
+    for check_name, passed, requirement in checks:
+        status = "[green]✓ Passed[/green]" if passed else "[red]✗ Failed[/red]"
+        if not passed and requirement == "Required":
+            all_passed = False
+        table.add_row(check_name, status, requirement)
+    
+    console.print(table)
+    
+    if verbose and enabled_agents:
+        console.print(f"\n[cyan]Enabled agents:[/cyan] {', '.join(enabled_agents)}")
+    
+    if all_passed:
+        console.print("\n[bold green]✓ All validation checks passed![/bold green]")
+        console.print("Your environment is ready for security scanning.")
+        return 0
+    else:
+        console.print("\n[bold red]✗ Validation failed![/bold red]")
+        console.print("Please fix the issues above before proceeding.")
+        return 1
+
+
+@cli.command()
+@click.option('--scan-id', '-s', required=True, help='Scan ID to generate report for')
+@click.option('--format', '-f', type=click.Choice(['json', 'html', 'sarif', 'pdf']), 
+              default='html', help='Report format')
+@click.option('--output', '-o', type=click.Path(), help='Output file path')
+@click.option('--dashboard/--no-dashboard', default=False, help='Open dashboard in browser')
+def report(scan_id, format, output, dashboard):
+    """Generate comprehensive security report"""
+    cli_handler = SecurityAuditCLI()
+    config = cli_handler.load_config()
+    
+    api_endpoint = config.get('api', {}).get('endpoint', cli_handler.api_endpoint)
+    api_token = config.get('api', {}).get('auth_token', cli_handler.api_token)
+    
+    if not api_endpoint or not api_token:
+        console.print("[red]Error: API configuration missing. Run 'ai-security configure' first.[/red]")
+        return 1
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console
+    ) as progress:
+        task = progress.add_task("Generating report...", total=None)
+        
+        try:
+            # Fetch scan results
+            response = requests.get(
+                f"{api_endpoint}/scans/{scan_id}/results",
+                headers={"Authorization": f"Bearer {api_token}"},
+                params={"format": format}
+            )
+            response.raise_for_status()
             
-            # Show scan header
-            self._show_scan_header(scan_path, scan_type)
+            if format == 'json':
+                report_data = response.json()
+                
+                # Display summary
+                console.print(f"\n[bold]Security Scan Report - {scan_id}[/bold]\n")
+                
+                summary = report_data.get('summary', {})
+                
+                table = Table(title="Vulnerability Summary")
+                table.add_column("Severity", style="cyan")
+                table.add_column("Count", style="white")
+                
+                table.add_row("Critical", str(summary.get('critical', 0)))
+                table.add_row("High", str(summary.get('high', 0)))
+                table.add_row("Medium", str(summary.get('medium', 0)))
+                table.add_row("Low", str(summary.get('low', 0)))
+                table.add_row("Info", str(summary.get('info', 0)))
+                
+                console.print(table)
+                
+                # Save report
+                if output:
+                    with open(output, 'w') as f:
+                        json.dump(report_data, f, indent=2)
+                else:
+                    output = f"security-report-{scan_id}.json"
+                    with open(output, 'w') as f:
+                        json.dump(report_data, f, indent=2)
+            else:
+                # Save binary formats
+                if not output:
+                    output = f"security-report-{scan_id}.{format}"
+                
+                with open(output, 'wb') as f:
+                    f.write(response.content)
             
-            # Run AI scan with progress
+            progress.update(task, completed=True)
+            console.print(f"\n[green]✓ Report saved to {output}[/green]")
+            
+            # Open dashboard if requested
+            if dashboard:
+                dashboard_url = report_data.get('dashboard_url')
+                if dashboard_url:
+                    import webbrowser
+                    webbrowser.open(dashboard_url)
+                    console.print(f"[cyan]Dashboard opened in browser: {dashboard_url}[/cyan]")
+            
+        except requests.exceptions.RequestException as e:
+            console.print(f"[red]Error generating report: {e}[/red]")
+            return 1
+
+
+@cli.command()
+@click.option('--scan-id', '-s', required=True, help='Scan ID with findings to remediate')
+@click.option('--finding-ids', '-f', multiple=True, help='Specific finding IDs to remediate')
+@click.option('--severity', type=click.Choice(['critical', 'high', 'medium', 'low']), 
+              help='Remediate all findings of this severity')
+@click.option('--auto-apply/--no-auto-apply', default=False, help='Automatically apply fixes')
+@click.option('--dry-run', is_flag=True, help='Show what would be fixed without applying')
+def remediate(scan_id, finding_ids, severity, auto_apply, dry_run):
+    """Apply AI-powered remediation for vulnerabilities"""
+    cli_handler = SecurityAuditCLI()
+    config = cli_handler.load_config()
+    
+    api_endpoint = config.get('api', {}).get('endpoint', cli_handler.api_endpoint)
+    api_token = config.get('api', {}).get('auth_token', cli_handler.api_token)
+    
+    if not api_endpoint or not api_token:
+        console.print("[red]Error: API configuration missing. Run 'ai-security configure' first.[/red]")
+        return 1
+    
+    console.print(f"[cyan]Fetching findings for scan {scan_id}...[/cyan]")
+    
+    try:
+        # Get scan findings
+        response = requests.get(
+            f"{api_endpoint}/scans/{scan_id}/findings",
+            headers={"Authorization": f"Bearer {api_token}"}
+        )
+        response.raise_for_status()
+        
+        findings = response.json().get('findings', [])
+        
+        # Filter findings
+        if finding_ids:
+            findings = [f for f in findings if f['finding_id'] in finding_ids]
+        elif severity:
+            findings = [f for f in findings if f['severity'].lower() == severity]
+        
+        if not findings:
+            console.print("[yellow]No findings match the criteria.[/yellow]")
+            return 0
+        
+        console.print(f"\n[bold]Found {len(findings)} findings to remediate[/bold]\n")
+        
+        # Display findings
+        table = Table(title="Findings to Remediate")
+        table.add_column("Finding ID", style="cyan")
+        table.add_column("Type", style="white")
+        table.add_column("Severity", style="yellow")
+        table.add_column("File", style="blue")
+        
+        for finding in findings[:10]:  # Show first 10
+            table.add_row(
+                finding['finding_id'],
+                finding['type'],
+                finding['severity'],
+                finding.get('file_path', 'N/A')
+            )
+        
+        if len(findings) > 10:
+            table.add_row("...", "...", "...", f"... and {len(findings) - 10} more")
+        
+        console.print(table)
+        
+        if dry_run:
+            console.print("\n[yellow]DRY RUN - No changes will be applied[/yellow]")
+        
+        if not auto_apply and not dry_run:
+            if not Confirm.ask("\nDo you want to proceed with remediation?"):
+                console.print("[yellow]Remediation cancelled.[/yellow]")
+                return 0
+        
+        # Generate remediations
+        console.print("\n[cyan]Generating remediations...[/cyan]")
+        
+        remediation_request = {
+            "scan_id": scan_id,
+            "finding_ids": [f['finding_id'] for f in findings],
+            "dry_run": dry_run,
+            "auto_apply": auto_apply
+        }
+        
+        response = requests.post(
+            f"{api_endpoint}/remediations/generate",
+            headers={"Authorization": f"Bearer {api_token}"},
+            json=remediation_request
+        )
+        response.raise_for_status()
+        
+        remediation_result = response.json()
+        
+        # Display results
+        console.print(f"\n[bold]Remediation Results[/bold]\n")
+        
+        successful = remediation_result.get('successful', 0)
+        failed = remediation_result.get('failed', 0)
+        
+        console.print(f"[green]✓ Successfully remediated: {successful}[/green]")
+        console.print(f"[red]✗ Failed to remediate: {failed}[/red]")
+        
+        if remediation_result.get('remediation_details'):
+            console.print("\n[cyan]Remediation Details:[/cyan]")
+            for detail in remediation_result['remediation_details'][:5]:
+                console.print(f"  - {detail['finding_id']}: {detail['status']}")
+                if detail.get('fix_applied'):
+                    console.print(f"    Fix: {detail['fix_applied']}")
+        
+        if not dry_run and successful > 0:
+            console.print("\n[green]✓ Remediations applied successfully![/green]")
+            console.print("Run a new scan to verify the fixes.")
+        
+    except requests.exceptions.RequestException as e:
+        console.print(f"[red]Error during remediation: {e}[/red]")
+        return 1
+
+
+@cli.command()
+@click.argument('repository-url')
+@click.option('--branch', '-b', default='main', help='Branch to scan')
+@click.option('--priority', '-p', type=click.Choice(['low', 'normal', 'high', 'critical']), 
+              default='normal', help='Scan priority')
+@click.option('--agents', '-a', default='all', help='Comma-separated list of agents to run')
+@click.option('--wait/--no-wait', default=True, help='Wait for scan completion')
+@click.option('--output-format', '-f', type=click.Choice(['json', 'table']), 
+              default='table', help='Output format')
+def scan(repository_url, branch, priority, agents, wait, output_format):
+    """Run security scan on a repository"""
+    cli_handler = SecurityAuditCLI()
+    config = cli_handler.load_config()
+    
+    api_endpoint = config.get('api', {}).get('endpoint', cli_handler.api_endpoint)
+    api_token = config.get('api', {}).get('auth_token', cli_handler.api_token)
+    
+    if not api_endpoint or not api_token:
+        console.print("[red]Error: API configuration missing. Run 'ai-security configure' first.[/red]")
+        return 1
+    
+    # Parse agents
+    agent_list = agents.split(',') if agents != 'all' else ['all']
+    
+    scan_request = {
+        "repository_url": repository_url,
+        "branch": branch,
+        "priority": priority,
+        "agents": agent_list
+    }
+    
+    console.print(f"[cyan]Starting security scan on {repository_url}...[/cyan]")
+    
+    try:
+        # Start scan
+        response = requests.post(
+            f"{api_endpoint}/scans",
+            headers={"Authorization": f"Bearer {api_token}"},
+            json=scan_request
+        )
+        response.raise_for_status()
+        
+        scan_data = response.json()
+        scan_id = scan_data['scan_id']
+        
+        console.print(f"[green]✓ Scan started with ID: {scan_id}[/green]")
+        
+        if wait:
+            # Poll for completion
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 console=console
             ) as progress:
-                task = progress.add_task("Running AI security analysis...", total=None)
+                task = progress.add_task("Waiting for scan completion...", total=None)
                 
-                # Execute scan
-                scan_result = run_ai_scan(str(scan_path), scan_type)
+                while True:
+                    response = requests.get(
+                        f"{api_endpoint}/scans/{scan_id}/status",
+                        headers={"Authorization": f"Bearer {api_token}"}
+                    )
+                    response.raise_for_status()
+                    
+                    status_data = response.json()
+                    status = status_data['status']
+                    
+                    if status in ['completed', 'failed']:
+                        break
+                    
+                    import time
+                    time.sleep(5)
                 
                 progress.update(task, completed=True)
             
-            # Check for errors
-            if scan_result.get('status') == 'failed':
-                console.print(f"[red]Scan failed: {scan_result.get('error', 'Unknown error')}[/red]")
-                return 2
-            
-            # Display results based on format
-            if output_format == "json":
-                self._output_json(scan_result)
-            elif output_format == "sarif":
-                self._output_sarif(scan_result)
-            elif output_format == "markdown":
-                self._output_markdown(scan_result)
-            else:
-                self._display_terminal_results(scan_result, explain)
-            
-            # Auto-fix if requested
-            if fix and scan_result['total_findings'] > 0:
-                self._attempt_auto_fix(scan_result)
-            
-            # Return appropriate exit code
-            if scan_result['critical_findings'] > 0:
-                return 1
-            elif scan_result['total_findings'] > 0:
-                return 1
-            else:
-                return 0
+            if status == 'completed':
+                # Get results
+                response = requests.get(
+                    f"{api_endpoint}/scans/{scan_id}/results",
+                    headers={"Authorization": f"Bearer {api_token}"}
+                )
+                response.raise_for_status()
                 
-        except Exception as e:
-            console.print(f"[red]Unexpected error: {str(e)}[/red]")
-            return 2
-    
-    def _show_scan_header(self, path: Path, scan_type: str):
-        """Display scan header with AI branding"""
-        header = Panel(
-            f"[bold cyan]🤖 AI Security Scanner[/bold cyan]\n\n"
-            f"[dim]Powered by Claude 3 via AWS Bedrock[/dim]\n"
-            f"Path: {path}\n"
-            f"Scan Type: {scan_type}",
-            title="Security Audit Framework",
-            border_style="cyan"
-        )
-        console.print(header)
-        console.print()
-    
-    def _display_terminal_results(self, scan_result: Dict, explain: bool):
-        """Display results in terminal with rich formatting"""
+                results = response.json()
+                
+                if output_format == 'json':
+                    console.print_json(data=results)
+                else:
+                    # Display summary table
+                    summary = results.get('summary', {})
+                    
+                    table = Table(title=f"Scan Results - {scan_id}")
+                    table.add_column("Metric", style="cyan")
+                    table.add_column("Value", style="white")
+                    
+                    table.add_row("Repository", repository_url)
+                    table.add_row("Branch", branch)
+                    table.add_row("Total Findings", str(summary.get('total_findings', 0)))
+                    table.add_row("Critical", str(summary.get('critical', 0)))
+                    table.add_row("High", str(summary.get('high', 0)))
+                    table.add_row("Medium", str(summary.get('medium', 0)))
+                    table.add_row("Low", str(summary.get('low', 0)))
+                    table.add_row("Dashboard URL", results.get('dashboard_url', 'N/A'))
+                    
+                    console.print(table)
+                    
+                    if summary.get('critical', 0) > 0:
+                        console.print("\n[red]⚠ Critical vulnerabilities found![/red]")
+                        console.print("Run 'ai-security report' to view detailed findings.")
+            else:
+                console.print(f"[red]✗ Scan failed: {status_data.get('error', 'Unknown error')}[/red]")
+                return 1
+        else:
+            console.print(f"\nScan ID: {scan_id}")
+            console.print("Use 'ai-security status' to check scan progress.")
         
-        # Summary panel
-        summary = Panel(
-            f"[bold]Scan Summary[/bold]\n\n"
-            f"Total Findings: {scan_result['total_findings']}\n"
-            f"Critical: [red]{scan_result['critical_findings']}[/red]\n"
-            f"High: [yellow]{scan_result['high_findings']}[/yellow]\n"
-            f"Business Risk Score: {scan_result['business_risk_score']:.1f}/100\n"
-            f"AI Confidence: {scan_result['ai_confidence_score']:.1%}",
-            title="Results",
-            border_style="green" if scan_result['total_findings'] == 0 else "red"
-        )
-        console.print(summary)
-        console.print()
-        
-        # Get detailed findings if available
-        if scan_result['total_findings'] > 0:
-            findings = self._get_detailed_findings(scan_result['scan_id'])
-            
-            # Group findings by severity
-            by_severity = self._group_by_severity(findings)
-            
-            # Display critical findings first
-            if by_severity.get('CRITICAL'):
-                console.print("[bold red]🚨 CRITICAL Security Issues[/bold red]")
-                for finding in by_severity['CRITICAL']:
-                    self._display_finding(finding, explain)
-                console.print()
-            
-            # Display high findings
-            if by_severity.get('HIGH'):
-                console.print("[bold yellow]⚠️  HIGH Security Issues[/bold yellow]")
-                for finding in by_severity['HIGH']:
-                    self._display_finding(finding, explain)
-                console.print()
-            
-            # Display medium findings
-            if by_severity.get('MEDIUM'):
-                console.print("[bold blue]ℹ️  MEDIUM Security Issues[/bold blue]")
-                for finding in by_severity['MEDIUM'][:5]:  # Show first 5
-                    self._display_finding(finding, explain)
-                if len(by_severity['MEDIUM']) > 5:
-                    console.print(f"[dim]... and {len(by_severity['MEDIUM']) - 5} more[/dim]")
-                console.print()
-        
-        # Show AI insights
-        insights = self._get_ai_insights(scan_result['scan_id'])
-        if insights:
-            self._display_insights(insights)
-    
-    def _display_finding(self, finding: Dict, explain: bool):
-        """Display individual finding with AI explanation"""
-        # Finding header
-        console.print(f"\n[bold]{finding['file_path']}[/bold]")
-        console.print(f"  Type: {finding['finding_type']}")
-        console.print(f"  {finding['description']}")
-        
-        # Show remediation
-        if finding.get('remediation'):
-            console.print(f"  [green]Fix:[/green] {finding['remediation']}")
-        
-        # Show AI explanation if requested
-        if explain and finding.get('reasoning'):
-            console.print("  [cyan]AI Analysis:[/cyan]")
-            for step in finding['reasoning'][:3]:
-                console.print(f"    • {step}")
-        
-        # Show confidence level
-        confidence_color = {
-            'very_high': 'green',
-            'high': 'green',
-            'medium': 'yellow',
-            'low': 'red',
-            'very_low': 'red'
-        }.get(finding.get('confidence_level', 'medium'), 'yellow')
-        
-        console.print(f"  [dim]Confidence: [{confidence_color}]{finding.get('confidence_level', 'unknown')}[/{confidence_color}][/dim]")
-        
-        # Show false positive indicators if any
-        if finding.get('false_positive_indicators'):
-            console.print("  [dim yellow]Possible false positive:[/dim yellow]")
-            for indicator in finding['false_positive_indicators']:
-                console.print(f"    - {indicator}")
-    
-    def _display_insights(self, insights: Dict):
-        """Display AI-generated insights"""
-        insights_panel = Panel(
-            f"[bold]AI Security Insights[/bold]\n\n"
-            f"{insights.get('executive_summary', 'No insights available')}\n\n"
-            f"[bold]Key Recommendations:[/bold]\n" +
-            "\n".join(f"  {i+1}. {rec}" for i, rec in enumerate(insights.get('key_recommendations', []))) +
-            f"\n\n[bold]Risk Assessment:[/bold] {insights.get('risk_assessment', 'Unknown')}",
-            title="🧠 AI Analysis",
-            border_style="cyan"
-        )
-        console.print(insights_panel)
-    
-    def _get_detailed_findings(self, scan_id: str) -> List[Dict]:
-        """Retrieve detailed findings for a scan"""
-        # In a real implementation, this would query DynamoDB
-        # For now, return mock data to demonstrate the interface
-        return []
-    
-    def _get_ai_insights(self, scan_id: str) -> Dict:
-        """Retrieve AI insights for a scan"""
-        # In a real implementation, this would query S3
-        # For now, return mock data
-        return {
-            'executive_summary': 'The scan identified several security vulnerabilities that require immediate attention.',
-            'key_recommendations': [
-                'Update vulnerable dependencies to patched versions',
-                'Implement input validation for user-supplied data',
-                'Review and fix SQL injection vulnerabilities'
-            ],
-            'risk_assessment': 'High'
-        }
-    
-    def _group_by_severity(self, findings: List[Dict]) -> Dict[str, List[Dict]]:
-        """Group findings by severity"""
-        grouped = {}
-        for finding in findings:
-            severity = finding.get('severity', 'UNKNOWN')
-            if severity not in grouped:
-                grouped[severity] = []
-            grouped[severity].append(finding)
-        return grouped
-    
-    def _attempt_auto_fix(self, scan_result: Dict):
-        """Attempt to auto-fix findings using AI"""
-        console.print("\n[bold cyan]🔧 Attempting AI-powered auto-fix...[/bold cyan]")
-        
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console
-        ) as progress:
-            task = progress.add_task("Generating fixes...", total=None)
-            
-            # In real implementation, this would:
-            # 1. Get findings that can be auto-fixed
-            # 2. Use AI to generate fixes
-            # 3. Apply fixes with user confirmation
-            # 4. Re-scan to verify
-            
-            progress.update(task, completed=True)
-        
-        console.print("[green]✓ Auto-fix completed (demo mode)[/green]")
-    
-    def _output_json(self, scan_result: Dict):
-        """Output results as JSON"""
-        print(json.dumps(scan_result, indent=2))
-    
-    def _output_sarif(self, scan_result: Dict):
-        """Output results in SARIF format"""
-        sarif = {
-            "version": "2.1.0",
-            "runs": [{
-                "tool": {
-                    "driver": {
-                        "name": "AI Security Scanner",
-                        "version": "1.0.0",
-                        "informationUri": "https://github.com/example/security-audit-framework",
-                        "rules": []
-                    }
-                },
-                "results": [],
-                "properties": {
-                    "scan_id": scan_result['scan_id'],
-                    "ai_confidence_score": scan_result['ai_confidence_score'],
-                    "business_risk_score": scan_result['business_risk_score']
-                }
-            }]
-        }
-        print(json.dumps(sarif, indent=2))
-    
-    def _output_markdown(self, scan_result: Dict):
-        """Output results as Markdown"""
-        md = f"""# AI Security Scan Report
+    except requests.exceptions.RequestException as e:
+        console.print(f"[red]Error during scan: {e}[/red]")
+        return 1
 
-## Summary
 
-- **Total Findings**: {scan_result['total_findings']}
-- **Critical**: {scan_result['critical_findings']}
-- **High**: {scan_result['high_findings']}
-- **Business Risk Score**: {scan_result['business_risk_score']:.1f}/100
-- **AI Confidence**: {scan_result['ai_confidence_score']:.1%}
-
-## Scan Details
-
-- **Scan ID**: {scan_result['scan_id']}
-- **Status**: {scan_result['status']}
-
----
-
-*Generated by AI Security Scanner powered by Claude 3*
-"""
-        print(md)
-
-# CLI Commands
-@click.group()
-@click.version_option(version="2.0.0", prog_name="AI Security Scanner")
-def cli():
-    """AI-Powered Security Scanner for modern applications"""
-    pass
-
-@cli.command()
-@click.option('--path', '-p', default=".", help='Path to scan')
-@click.option('--type', '-t', 'scan_type', 
-              type=click.Choice(['full', 'incremental', 'pr']), 
-              default='incremental',
-              help='Type of scan to perform')
-@click.option('--format', '-f', 'output_format',
-              type=click.Choice(['terminal', 'json', 'sarif', 'markdown']),
-              default='terminal',
-              help='Output format')
-@click.option('--fix', is_flag=True, help='Attempt to auto-fix issues using AI')
-@click.option('--no-explain', is_flag=True, help='Skip AI explanations')
-@click.option('--include-suppressed', is_flag=True, help='Include suppressed findings')
-def scan(path, scan_type, output_format, fix, no_explain, include_suppressed):
-    """Run AI-powered security scan"""
-    scanner = AISecurityCLI()
-    exit_code = scanner.scan(
-        path=path,
-        scan_type=scan_type,
-        output_format=output_format,
-        fix=fix,
-        explain=not no_explain,
-        include_suppressed=include_suppressed
-    )
-    sys.exit(exit_code)
-
-@cli.command()
-@click.argument('finding_id')
-def explain(finding_id):
-    """Get detailed AI explanation for a finding"""
-    explainer = AIExplainabilityEngine()
-    explanation = explainer.get_explanation_by_id(finding_id)
-    
-    if explanation:
-        console.print(Panel(
-            f"[bold]Finding: {finding_id}[/bold]\n\n"
-            f"Model: {explanation['ai_model']}\n"
-            f"Confidence: {explanation['confidence_score']:.1%}\n\n"
-            f"[bold]Evidence:[/bold]\n" +
-            "\n".join(f"  • {e['description']}" for e in explanation['evidence']) +
-            f"\n\n[bold]Reasoning:[/bold]\n" +
-            "\n".join(f"  {i+1}. {step}" for i, step in enumerate(explanation['reasoning'])),
-            title="AI Explanation",
-            border_style="cyan"
-        ))
-    else:
-        console.print("[red]Finding not found[/red]")
-
-@cli.command()
-@click.argument('policy_description')
-@click.option('--examples', '-e', multiple=True, help='Example violations')
-def create_policy(policy_description, examples):
-    """Create custom security policy using natural language"""
-    ai_features = AISecurityFeatures()
-    
-    with console.status("Creating policy with AI..."):
-        policy = ai_features.policy_engine.create_policy_from_natural_language(
-            policy_description,
-            list(examples) if examples else None
-        )
-    
-    if 'error' not in policy:
-        console.print(Panel(
-            f"[bold green]✓ Policy Created[/bold green]\n\n"
-            f"ID: {policy['policy_id']}\n"
-            f"Name: {policy['policy_name']}\n"
-            f"Description: {policy['description']}",
-            title="New Security Policy",
-            border_style="green"
-        ))
-    else:
-        console.print(f"[red]Failed to create policy: {policy['error']}[/red]")
-
-@cli.command()
-@click.argument('package_name')
-@click.option('--ecosystem', '-e', default='python', help='Package ecosystem')
-def check_package(package_name, ecosystem):
-    """Check package for supply chain risks using AI"""
-    ai_features = AISecurityFeatures()
-    
-    with console.status(f"Analyzing {package_name} with AI..."):
-        # Analyze package behavior
-        behavior = ai_features.supply_chain.analyze_package_behavior_with_ai(package_name)
-        
-        # Check package health
-        health = ai_features.supply_chain.analyze_package_health(package_name, ecosystem)
-    
-    # Display results
-    console.print(Panel(
-        f"[bold]Package: {package_name}[/bold]\n"
-        f"Ecosystem: {ecosystem}\n\n"
-        f"[bold]Behavior Analysis:[/bold]\n"
-        f"Malicious Probability: {behavior.get('malicious_probability', 0):.1%}\n"
-        f"Recommendation: {behavior.get('recommendation', 'unknown')}\n\n"
-        f"[bold]Health Score:[/bold] {health.get('health_score', 0):.1f}/100\n"
-        f"Issues: {', '.join(health.get('issues', [])) or 'None'}",
-        title="AI Package Analysis",
-        border_style="yellow" if behavior.get('malicious_probability', 0) > 0.5 else "green"
-    ))
-
-@cli.command()
-@click.option('--model', '-m', default='anthropic.claude-3-sonnet-20240229-v1:0', help='AI model ID')
-def stats(model):
-    """Show AI model performance statistics"""
-    explainer = AIExplainabilityEngine()
-    stats = explainer.get_model_performance_stats(model)
-    
-    if stats:
-        table = Table(title=f"AI Model Performance: {model}")
-        table.add_column("Metric", style="cyan")
-        table.add_column("Value", style="green")
-        
-        table.add_row("Total Samples", str(stats.get('total_samples', 0)))
-        table.add_row("Overall Accuracy", f"{stats.get('overall_accuracy', 0):.1%}")
-        table.add_row("Calibration Error", f"{stats.get('calibration_error', 0):.1%}")
-        table.add_row("Well Calibrated", "✓" if stats.get('is_well_calibrated') else "✗")
-        
-        console.print(table)
-    else:
-        console.print("[yellow]No statistics available for this model[/yellow]")
-
-@cli.command()
-def init():
-    """Initialize AI security scanning for current project"""
-    console.print("[bold cyan]🤖 Initializing AI Security Scanner[/bold cyan]\n")
-    
-    # Create .security directory
-    security_dir = Path(".security")
-    security_dir.mkdir(exist_ok=True)
-    
-    # Create config file
-    config = {
-        "version": "2.0.0",
-        "ai_model": "anthropic.claude-3-sonnet-20240229-v1:0",
-        "scan_type": "incremental",
-        "auto_suppress_test_files": True,
-        "confidence_threshold": 0.7,
-        "policies": [
-            "no-hardcoded-secrets",
-            "no-sql-injection",
-            "secure-dependencies"
-        ]
-    }
-    
-    config_path = security_dir / "config.json"
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
-    
-    console.print(f"[green]✓ Created {config_path}[/green]")
-    
-    # Create .gitignore entry
-    gitignore_path = Path(".gitignore")
-    if gitignore_path.exists():
-        with open(gitignore_path, 'r') as f:
-            content = f.read()
-        if '.security/cache' not in content:
-            with open(gitignore_path, 'a') as f:
-                f.write("\n# AI Security Scanner\n.security/cache/\n")
-            console.print("[green]✓ Updated .gitignore[/green]")
-    
-    console.print("\n[bold green]AI Security Scanner initialized![/bold green]")
-    console.print("Run 'ai-security scan' to start scanning")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     cli()

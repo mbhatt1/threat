@@ -429,6 +429,66 @@ class MonitoringStack(Stack):
             ]
         )
         
+    def _create_custom_metrics(self, lambdas: Dict[str, lambda_.Function],
+                              tables: Dict[str, dynamodb.Table],
+                              buckets: Dict[str, s3.Bucket]):
+        """Create custom CloudWatch metrics"""
+        
+        # Create metric filters for Lambda logs
+        for name, function in lambdas.items():
+            if hasattr(function, 'log_group'):
+                # Scan performance metric
+                function.log_group.add_metric_filter(
+                    f"{name}ScanPerformanceMetric",
+                    filter_pattern=logs.FilterPattern.exists("$.scan_duration"),
+                    metric_name="ScanExecutionTime",
+                    metric_namespace="SecurityAudit",
+                    metric_value="$.scan_duration",
+                    dimensions={
+                        "FunctionName": function.function_name,
+                        "MetricType": "Performance"
+                    }
+                )
+                
+                # AI model accuracy metric
+                function.log_group.add_metric_filter(
+                    f"{name}AIAccuracyMetric",
+                    filter_pattern=logs.FilterPattern.exists("$.ai_accuracy"),
+                    metric_name="AIModelAccuracy",
+                    metric_namespace="SecurityAudit",
+                    metric_value="$.ai_accuracy",
+                    dimensions={
+                        "FunctionName": function.function_name,
+                        "ModelType": "SecurityAnalysis"
+                    }
+                )
+                
+                # False positive rate metric
+                function.log_group.add_metric_filter(
+                    f"{name}FalsePositiveMetric",
+                    filter_pattern=logs.FilterPattern.exists("$.false_positive_rate"),
+                    metric_name="FalsePositiveRate",
+                    metric_namespace="SecurityAudit",
+                    metric_value="$.false_positive_rate",
+                    dimensions={
+                        "FunctionName": function.function_name,
+                        "ScanType": "All"
+                    }
+                )
+                
+                # Service failure metric
+                function.log_group.add_metric_filter(
+                    f"{name}ServiceFailureMetric",
+                    filter_pattern=logs.FilterPattern.literal("[ERROR] Service failure"),
+                    metric_name="ServiceFailures",
+                    metric_namespace="SecurityAudit",
+                    metric_value="1",
+                    dimensions={
+                        "FunctionName": function.function_name,
+                        "ServiceType": "SecurityServices"
+                    }
+                )
+        
         # Output alarm ARNs for integration
         CfnOutput(
             self, "CriticalAlarmArn",

@@ -425,6 +425,35 @@ class LambdaStack(Stack):
         # Grant permissions for SNS handler
         scan_table.grant_read_write_data(self.sns_handler_lambda)
         
+        # ECR Scanning Enabler Lambda
+        self.ecr_scanning_lambda = lambda_python.PythonFunction(
+            self, "ECRScanningEnablerLambda",
+            entry=os.path.join("..", "src", "lambdas", "ecr_scanning_enabler"),
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.lambda_handler",
+            index="handler.py",
+            environment={
+                "LOG_LEVEL": "INFO"
+            },
+            environment_encryption=kms_key,
+            timeout=Duration.minutes(2),
+            memory_size=512,
+            layers=[shared_layer],
+            log_retention=logs.RetentionDays.ONE_WEEK,
+            description="Enables vulnerability scanning on ECR repositories"
+        )
+        
+        # Grant ECR permissions
+        self.ecr_scanning_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "ecr:PutImageScanningConfiguration",
+                "ecr:StartImageScan",
+                "ecr:DescribeImageScanFindings",
+                "ecr:PutLifecyclePolicy"
+            ],
+            resources=["*"]
+        ))
+        
         # Add concurrent execution limits to prevent runaway costs
         self.ceo_agent_lambda.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.AWS_IAM

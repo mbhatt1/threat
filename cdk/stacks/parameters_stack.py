@@ -71,6 +71,95 @@ class ParametersStack(Stack):
             removal_policy=RemovalPolicy.RETAIN
         )
         
+        # Container registry credentials
+        self.ecr_scanning_credentials = secrets.Secret(
+            self, "ECRScanningCredentials",
+            secret_name="security-audit/ecr-scanning-credentials",
+            description="Credentials for ECR vulnerability scanning",
+            generate_secret_string=secrets.SecretStringGenerator(
+                secret_string_template='{"username": "", "password": ""}',
+                generate_string_key="password",
+                exclude_characters=" %+~`#$&*()|[]{}:;<>?!'/\\",
+                password_length=32
+            ),
+            encryption_key=kms_key,
+            removal_policy=RemovalPolicy.RETAIN
+        )
+        
+        # Vulnerability database API keys
+        self.nvd_api_key = secrets.Secret(
+            self, "NVDApiKey",
+            secret_name="security-audit/nvd-api-key",
+            description="NIST NVD API key for vulnerability database access",
+            generate_secret_string=secrets.SecretStringGenerator(
+                secret_string_template='{"api_key": ""}',
+                generate_string_key="api_key",
+                exclude_characters=" %+~`#$&*()|[]{}:;<>?!'/\\",
+                password_length=40
+            ),
+            encryption_key=kms_key,
+            removal_policy=RemovalPolicy.RETAIN
+        )
+        
+        # Third-party security service API keys
+        self.security_service_keys = secrets.Secret(
+            self, "SecurityServiceKeys",
+            secret_name="security-audit/third-party-keys",
+            description="API keys for third-party security services",
+            secret_object_value={
+                "snyk_api_key": secrets.SecretValue.unsafe_plain_text("CHANGE_ME"),
+                "sonarqube_token": secrets.SecretValue.unsafe_plain_text("CHANGE_ME"),
+                "virustotal_api_key": secrets.SecretValue.unsafe_plain_text("CHANGE_ME"),
+                "shodan_api_key": secrets.SecretValue.unsafe_plain_text("CHANGE_ME")
+            },
+            encryption_key=kms_key,
+            removal_policy=RemovalPolicy.RETAIN
+        )
+        
+        # Cross-account scanning role ARN
+        self.cross_account_role_secret = secrets.Secret(
+            self, "CrossAccountRoleArn",
+            secret_name="security-audit/cross-account-role",
+            description="ARN of cross-account role for scanning other AWS accounts",
+            generate_secret_string=secrets.SecretStringGenerator(
+                secret_string_template='{"role_arn": "arn:aws:iam::ACCOUNT_ID:role/SecurityAuditRole", "external_id": ""}',
+                generate_string_key="external_id",
+                exclude_characters=" %+~`#$&*()|[]{}:;<>?!'/\\",
+                password_length=32
+            ),
+            encryption_key=kms_key,
+            removal_policy=RemovalPolicy.RETAIN
+        )
+        
+        # Jenkins integration credentials
+        self.jenkins_credentials = secrets.Secret(
+            self, "JenkinsCredentials",
+            secret_name="security-audit/jenkins-credentials",
+            description="Jenkins API credentials for CI/CD integration",
+            generate_secret_string=secrets.SecretStringGenerator(
+                secret_string_template='{"username": "jenkins-user", "api_token": ""}',
+                generate_string_key="api_token",
+                exclude_characters=" %+~`#$&*()|[]{}:;<>?!'/\\",
+                password_length=32
+            ),
+            encryption_key=kms_key,
+            removal_policy=RemovalPolicy.RETAIN
+        )
+        
+        # AI model API keys
+        self.ai_model_keys = secrets.Secret(
+            self, "AIModelKeys",
+            secret_name="security-audit/ai-model-keys",
+            description="API keys for AI/ML services",
+            secret_object_value={
+                "openai_api_key": secrets.SecretValue.unsafe_plain_text("CHANGE_ME"),
+                "anthropic_api_key": secrets.SecretValue.unsafe_plain_text("CHANGE_ME"),
+                "huggingface_token": secrets.SecretValue.unsafe_plain_text("CHANGE_ME")
+            },
+            encryption_key=kms_key,
+            removal_policy=RemovalPolicy.RETAIN
+        )
+        
         # Feature flags
         self.enable_ai_features = ssm.StringParameter(
             self, "EnableAIFeatures",
