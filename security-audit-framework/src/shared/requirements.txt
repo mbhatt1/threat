@@ -26,3 +26,6 @@ aiofiles
 
 # JSON
 jsonschema>=4.0.0
+
+# Cryptography for secure archive
+cryptography>=41.0.0
