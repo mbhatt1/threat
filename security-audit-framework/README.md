@@ -107,6 +107,156 @@ The framework uses the **Strands Protocol** for inter-agent communication:
 - Real-time alerts and notifications
 - Compliance reporting (SOC2, PCI-DSS, HIPAA)
 
+### Secure Archive Module
+
+The framework includes a comprehensive secure archive module for backing up and protecting sensitive data with enterprise-grade encryption.
+
+#### **Features**
+- **Compression**: Automatic tar.gz compression with smart exclusions
+- **Encryption Options**:
+  - Password-based: AES-256-GCM with PBKDF2 key derivation
+  - KMS-based: AWS KMS managed keys with envelope encryption
+- **Cloud Storage**: Direct S3 integration with server-side encryption
+- **Security Analysis**: On-the-fly content analysis for sensitive files
+- **Stream Processing**: Analyze archives directly from S3 without full download
+
+#### **Password-Based Encryption**
+
+Quick backup with password encryption:
+```bash
+# Archive, encrypt, and upload in one command
+saf-cli quick-backup ./my-project --password
+
+# Individual operations
+saf-cli archive archive ./my-project
+saf-cli archive encrypt project.tar.gz --password
+saf-cli archive upload project.tar.gz.enc --s3-key backups/project.enc
+saf-cli archive decrypt project.tar.gz.enc --password
+```
+
+#### **KMS-Based Encryption (Recommended)**
+
+Enterprise-grade encryption using AWS KMS:
+```bash
+# Set KMS key (or use --kms-key option)
+export KMS_KEY_ID=alias/secure-archive-key
+
+# Complete KMS backup
+saf-cli quick-backup-kms ./my-project --s3-prefix projects/2024
+
+# Or use the full CLI
+saf-cli archive-kms backup ./my-project
+
+# Individual KMS operations
+saf-cli archive-kms encrypt archive.tar.gz
+saf-cli archive-kms decrypt archive.kms.enc
+saf-cli archive-kms analyze archive.kms.enc --encrypted
+```
+
+#### **Key Rotation**
+```bash
+# Rotate to a new KMS key
+saf-cli archive-kms rotate-key old-archive.enc alias/new-key
+```
+
+#### **Security Analysis**
+
+Analyze archive contents without extraction:
+```bash
+# Analyze local archive
+saf-cli archive analyze project.tar.gz
+
+# Analyze encrypted archive
+saf-cli archive analyze project.enc --encrypted --password
+
+# Stream analyze from S3 (KMS)
+saf-cli archive-kms stream-analyze backups/project.kms.enc
+```
+
+Output includes:
+- File type distribution
+- Largest files
+- Security concerns (sensitive files like .env, .key, .pem)
+- Path traversal risks
+
+#### **KMS Configuration**
+
+1. **Create KMS Key Policy**:
+```bash
+saf-cli archive-kms generate-policy \
+  --admin-role arn:aws:iam::123456789012:role/Admin \
+  --user-role arn:aws:iam::123456789012:role/Developer \
+  --output kms-policy.json
+```
+
+2. **Required IAM Permissions**:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "kms:GenerateDataKey",
+      "kms:Decrypt",
+      "kms:DescribeKey"
+    ],
+    "Resource": "arn:aws:kms:*:*:key/*"
+  }]
+}
+```
+
+3. **Environment Variables**:
+```bash
+export KMS_KEY_ID=alias/secure-archive-key
+export ARCHIVE_S3_BUCKET=my-secure-backups
+export AWS_REGION=us-east-1
+```
+
+#### **Technical Implementation**
+
+**Encryption Process (KMS)**:
+1. Generate data encryption key (DEK) from KMS
+2. Encrypt archive with plaintext DEK using AES-256-GCM
+3. Store encrypted DEK with the encrypted data
+4. Clear plaintext DEK from memory
+
+**File Format**:
+```
+[4 bytes: metadata length]
+[JSON metadata: encrypted_dek, nonce, tag, checksum, kms_key_id]
+[Encrypted archive data]
+```
+
+**Security Features**:
+- **Envelope Encryption**: Data key encrypted by KMS master key
+- **Integrity Verification**: SHA-256 checksums
+- **Audit Trail**: All KMS operations logged in CloudTrail
+- **Access Control**: IAM policies control encryption/decryption
+- **Sensitive File Detection**: Automatic scanning for credentials
+- **Path Traversal Protection**: Prevents directory escape attacks
+
+#### **Python API Usage**
+
+```python
+from src.shared.secure_archive_kms import SecureArchiveKMS
+
+# Initialize with KMS
+sa = SecureArchiveKMS(
+    kms_key_id="alias/secure-archive-key",
+    s3_bucket="my-secure-backups"
+)
+
+# Complete backup workflow
+result = sa.secure_backup_directory_kms(
+    "/sensitive/project",
+    s3_key_prefix="projects/2024"
+)
+
+print(f"S3 URI: {result['s3_uri']}")
+print(f"Encrypted with: {result['kms_key_arn']}")
+print(f"Security concerns: {result['analysis']['security_concerns']}")
+```
+
 ## 🏗️ Architecture
 
 ```

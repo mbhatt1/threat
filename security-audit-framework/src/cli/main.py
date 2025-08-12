@@ -14,6 +14,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 # Import CLI modules
 from cli.secure_archive_cli import cli as secure_archive_cli
+from cli.secure_archive_kms_cli import cli as secure_archive_kms_cli
 
 console = Console()
 
@@ -141,6 +142,7 @@ def aws(environment, region, profile):
 
 # Add the secure archive commands
 cli.add_command(secure_archive_cli, name='archive')
+cli.add_command(secure_archive_kms_cli, name='archive-kms')
 
 
 @cli.command()
@@ -217,7 +219,7 @@ def init():
 # Quick commands for common tasks
 @cli.command()
 @click.argument('directory', type=click.Path(exists=True))
-@click.option('--password', '-p', prompt=True, hide_input=True, 
+@click.option('--password', '-p', prompt=True, hide_input=True,
               confirmation_prompt=True, help='Encryption password')
 def quick_backup(directory, password):
     """Quick backup of a directory (archive + encrypt + upload)"""
@@ -237,6 +239,45 @@ def quick_backup(directory, password):
                 console.print(f"\n[red]⚠ Security concerns found:[/red]")
                 for concern in result['analysis']['security_concerns'][:3]:
                     console.print(f"  - {concern['file']}: {concern['concern']}")
+                    
+        except Exception as e:
+            console.print(f"[red]✗ Backup failed: {e}[/red]")
+            sys.exit(1)
+
+
+@cli.command()
+@click.argument('directory', type=click.Path(exists=True))
+@click.option('--kms-key', '-k', envvar='KMS_KEY_ID', help='KMS key ID or alias')
+@click.option('--s3-prefix', '-p', help='S3 key prefix')
+def quick_backup_kms(directory, kms_key, s3_prefix):
+    """Quick backup with KMS encryption (archive + encrypt + upload)"""
+    from shared.secure_archive_kms import SecureArchiveKMS
+    
+    if not kms_key:
+        console.print("[red]Error: KMS key ID is required![/red]")
+        console.print("Set KMS_KEY_ID environment variable or use --kms-key option")
+        sys.exit(1)
+    
+    try:
+        sa = SecureArchiveKMS(kms_key_id=kms_key)
+    except Exception as e:
+        console.print(f"[red]✗ KMS initialization failed: {e}[/red]")
+        sys.exit(1)
+    
+    with console.status("[cyan]Performing KMS-secured backup...") as status:
+        try:
+            result = sa.secure_backup_directory_kms(directory, s3_prefix)
+            
+            console.print(f"\n[green]✓ KMS Backup completed![/green]")
+            console.print(f"  Location: [blue]{result['s3_uri']}[/blue]")
+            console.print(f"  Size: [yellow]{result['encrypted_size']:,} bytes[/yellow]")
+            console.print(f"  KMS Key: [cyan]{kms_key}[/cyan]")
+            console.print(f"  Encryption: [green]{result['encryption_type']}[/green]")
+            
+            if result['analysis']['security_concerns']:
+                console.print(f"\n[red]⚠ Security concerns found:[/red]")
+                for concern in result['analysis']['security_concerns'][:3]:
+                    console.print(f"  - {concern['file']}: {concern['concern']} [{concern['severity']}]")
                     
         except Exception as e:
             console.print(f"[red]✗ Backup failed: {e}[/red]")
