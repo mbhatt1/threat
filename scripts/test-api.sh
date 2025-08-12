@@ -42,6 +42,20 @@ TEST_BRANCH="master"
 print_status "Testing Security Audit Framework API"
 print_status "API Endpoint: $API_ENDPOINT"
 
+# Check AWS credentials
+if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+    print_warning "AWS credentials not found in environment"
+    print_status "Attempting to use AWS CLI credentials..."
+    export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id)
+    export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key)
+    export AWS_REGION=$(aws configure get region)
+fi
+
+if [ -z "$AWS_REGION" ]; then
+    export AWS_REGION="us-east-1"
+    print_warning "AWS_REGION not set, defaulting to us-east-1"
+fi
+
 # Function to make API call
 api_call() {
     local method=$1

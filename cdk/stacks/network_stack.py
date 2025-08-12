@@ -72,8 +72,13 @@ class NetworkStack(Stack):
             description="HTTPS to VPC"
         )
         
+        # Get S3 prefix list dynamically based on region
+        s3_prefix_list = ec2.Peer.prefix_list(
+            self._get_s3_prefix_list_id()
+        )
+        
         self.lambda_security_group.add_egress_rule(
-            peer=ec2.Peer.prefix_list("pl-02cd2c6b"),  # S3 prefix list for us-east-1
+            peer=s3_prefix_list,
             connection=ec2.Port.tcp(443),
             description="HTTPS to S3"
         )
@@ -92,7 +97,7 @@ class NetworkStack(Stack):
         )
         
         self.ecs_security_group.add_egress_rule(
-            peer=ec2.Peer.prefix_list("pl-02cd2c6b"),  # S3 prefix list
+            peer=s3_prefix_list,  # Use the same dynamically retrieved S3 prefix list
             connection=ec2.Port.tcp(443),
             description="HTTPS to S3"
         )
@@ -232,6 +237,31 @@ class NetworkStack(Stack):
             connection=ec2.Port.tcp(2049),
             description="Allow NFS to EFS"
         )
+    
+    def _get_s3_prefix_list_id(self) -> str:
+        """Get the S3 prefix list ID for the current region"""
+        # S3 prefix list IDs by region
+        s3_prefix_lists = {
+            'us-east-1': 'pl-63a5400a',
+            'us-east-2': 'pl-7ca54015',
+            'us-west-1': 'pl-6ba54002',
+            'us-west-2': 'pl-68a54001',
+            'ap-south-1': 'pl-78a54011',
+            'ap-northeast-2': 'pl-78a54011',
+            'ap-southeast-1': 'pl-31a34658',
+            'ap-southeast-2': 'pl-6ca54005',
+            'ap-northeast-1': 'pl-61a54008',
+            'ca-central-1': 'pl-7da54014',
+            'eu-central-1': 'pl-6ea54007',
+            'eu-west-1': 'pl-6da54004',
+            'eu-west-2': 'pl-7ca54015',
+            'eu-west-3': 'pl-75b1541c',
+            'eu-north-1': 'pl-33a34d5a',
+            'sa-east-1': 'pl-6aa54003'
+        }
+        
+        # Get the current region, default to us-east-1 if not found
+        return s3_prefix_lists.get(self.region, 'pl-63a5400a')
         
         self.ecs_security_group.add_egress_rule(
             peer=self.efs_security_group,

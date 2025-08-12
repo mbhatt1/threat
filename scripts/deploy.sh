@@ -120,8 +120,9 @@ post_deployment() {
     print_status "Running post-deployment tasks..."
     
     # Get API endpoint
+    STACK_PREFIX=${STACK_PREFIX:-AISecurityAudit}
     API_ENDPOINT=$(aws cloudformation describe-stacks \
-        --stack-name SecurityAudit-${ENV}-API \
+        --stack-name ${STACK_PREFIX}-API \
         --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
         --output text)
     

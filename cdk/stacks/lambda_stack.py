@@ -12,6 +12,7 @@ from aws_cdk import (
     aws_logs as logs,
     aws_efs as efs,
     aws_lambda_destinations as lambda_destinations,
+    aws_kms as kms,
     Duration,
     RemovalPolicy
 )
@@ -39,6 +40,7 @@ class LambdaStack(Stack):
                  efs_filesystem: efs.FileSystem,
                  efs_access_point: efs.AccessPoint,
                  lambda_security_group: ec2.SecurityGroup,
+                 kms_key=None,  # KMS key for environment variable encryption
                  **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         
@@ -56,7 +58,12 @@ class LambdaStack(Stack):
             "RESULTS_BUCKET": results_bucket.bucket_name,
             "SCAN_TABLE": scan_table.table_name,
             "AWS_REGION": self.region,
-            "PYTHONPATH": "/opt/python"
+            "PYTHONPATH": "/opt/python",
+            "EXPLANATIONS_TABLE": f"security-explanations-{self.account}-{self.region}",
+            "BUSINESS_CONTEXT_TABLE": f"security-business-context-{self.account}-{self.region}",
+            "METRICS_BUCKET": f"security-audit-metrics-{self.account}-{self.region}",
+            "SECURITY_LAKE_BUCKET": "aws-security-data-lake",
+            "SECURITY_LAKE_PREFIX": "ext/SecurityAudit"
         }
         
         # CEO Agent Lambda with EFS mount
@@ -76,6 +83,7 @@ class LambdaStack(Stack):
                 "EFS_MOUNT_PATH": "/mnt/efs",
                 "REPOSITORY_PATH": "/mnt/efs/repos"
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(5),
             memory_size=1024,
             layers=[shared_layer],
@@ -105,6 +113,7 @@ class LambdaStack(Stack):
                 **common_env,
                 "EFS_MOUNT_PATH": "/mnt/efs",
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(10),  # Allow more time for large repos
             memory_size=2048,
             layers=[shared_layer],
@@ -130,6 +139,7 @@ class LambdaStack(Stack):
             vpc=vpc,
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             environment=common_env,
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(5),
             memory_size=512,
             layers=[shared_layer],
@@ -152,6 +162,7 @@ class LambdaStack(Stack):
                 "REPORT_EXPIRY_DAYS": "7",
                 "SES_SENDER_EMAIL": "security-scans@example.com"  # Update with your verified email
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(10),
             memory_size=1024,
             layers=[shared_layer],
@@ -176,6 +187,7 @@ class LambdaStack(Stack):
                 "QUICKSIGHT_USER_ARN": f"arn:aws:quicksight:{self.region}:{self.account}:user/default/Admin",
                 "QUICKSIGHT_NAMESPACE": "default"
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(5),
             memory_size=512,
             layers=[shared_layer],
@@ -224,6 +236,7 @@ class LambdaStack(Stack):
                 "APPROVED_ACTIONS": "rotate_secret,disable_key,tag_resource",
                 "AUTO_REMEDIATE": "false"  # Require manual approval by default
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(5),
             memory_size=512,
             layers=[shared_layer],
@@ -253,6 +266,7 @@ class LambdaStack(Stack):
                 "MAX_CONCURRENT_REQUESTS": "10",
                 "ANALYSIS_TIMEOUT": "300"
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(15),
             memory_size=1024,
             layers=[shared_layer],
@@ -278,6 +292,7 @@ class LambdaStack(Stack):
                 "ATHENA_DATABASE": "security_audit_findings",
                 "ATHENA_RESULTS_LOCATION": f"s3://{results_bucket.bucket_name}/athena-results/"
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(5),
             memory_size=512,
             layers=[shared_layer],
@@ -299,6 +314,7 @@ class LambdaStack(Stack):
                 **common_env,
                 "ATHENA_DATABASE": "security_audit_findings"
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(5),
             memory_size=1024,
             layers=[shared_layer],
@@ -327,6 +343,7 @@ class LambdaStack(Stack):
                 "BEDROCK_MODEL_ID": "anthropic.claude-3-sonnet-20240229-v1:0",
                 "MAX_PATH_DEPTH": "10"
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(10),
             memory_size=1024,
             layers=[shared_layer],
@@ -341,7 +358,7 @@ class LambdaStack(Stack):
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="handler.lambda_handler",
             index="handler.py",
-            role=lambda_role,  # Use general lambda role
+            role=ceo_agent_role,  # Use CEO agent role as lambda_role is not defined
             vpc=vpc,
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             security_groups=[lambda_security_group],
@@ -349,6 +366,7 @@ class LambdaStack(Stack):
                 **common_env,
                 "TRIGGER_RULES_TABLE": "ConditionalTriggerRules"
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(5),
             memory_size=512,
             layers=[shared_layer],
@@ -373,6 +391,7 @@ class LambdaStack(Stack):
                 "LEARNING_MODEL_PREFIX": "ml-models/",
                 "TRAINING_DATA_TABLE": "SecurityFindingsTraining"
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(15),
             memory_size=2048,
             layers=[shared_layer],
@@ -390,6 +409,7 @@ class LambdaStack(Stack):
                 "STATE_MACHINE_ARN": "",  # Will be set after step function creation
                 "SCAN_TABLE_NAME": scan_table.table_name
             },
+            environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.seconds(60),
             memory_size=512,
             layers=[shared_layer],

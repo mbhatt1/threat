@@ -257,7 +257,7 @@ class IAMStack(Stack):
             }
         ))
         
-        # QuickSight access
+        # QuickSight access with specific resources
         self.lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -266,7 +266,10 @@ class IAMStack(Stack):
                 "quicksight:CreateDataSet",
                 "quicksight:UpdateDataSet"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:quicksight:{self.region}:{self.account}:dataset/*",
+                f"arn:aws:quicksight:{self.region}:{self.account}:datasource/*"
+            ]
         ))
         
         # DynamoDB access for findings and learning tables
@@ -286,7 +289,7 @@ class IAMStack(Stack):
             ]
         ))
         
-        # ECS access for running tasks
+        # ECS access for running tasks with specific resources
         self.lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -294,7 +297,11 @@ class IAMStack(Stack):
                 "ecs:StopTask",
                 "ecs:DescribeTasks"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:ecs:{self.region}:{self.account}:task/*",
+                f"arn:aws:ecs:{self.region}:{self.account}:task-definition/*",
+                f"arn:aws:ecs:{self.region}:{self.account}:cluster/*"
+            ]
         ))
         
         # Pass role permissions
@@ -391,7 +398,7 @@ class IAMStack(Stack):
             resources=["arn:aws:logs:*:*:*"]
         ))
         
-        # Security Hub integration
+        # Security Hub integration with specific resources
         self.ai_security_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -399,7 +406,11 @@ class IAMStack(Stack):
                 "securityhub:GetFindings",
                 "securityhub:UpdateFindings"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:securityhub:{self.region}:{self.account}:hub/default",
+                f"arn:aws:securityhub:{self.region}:{self.account}:product/*",
+                f"arn:aws:securityhub:{self.region}:{self.account}:finding/*"
+            ]
         ))
         
         # Step Functions State Machine Role
@@ -418,7 +429,7 @@ class IAMStack(Stack):
             ]
         ))
         
-        # Grant permissions to run ECS tasks
+        # Grant permissions to run ECS tasks with specific resources
         self.state_machine_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -426,7 +437,11 @@ class IAMStack(Stack):
                 "ecs:StopTask",
                 "ecs:DescribeTasks"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:ecs:{self.region}:{self.account}:task/*",
+                f"arn:aws:ecs:{self.region}:{self.account}:task-definition/*",
+                f"arn:aws:ecs:{self.region}:{self.account}:cluster/*"
+            ]
         ))
         
         # Grant permissions to pass roles to ECS tasks
@@ -440,11 +455,13 @@ class IAMStack(Stack):
             ]
         ))
         
-        # Grant SNS publish permissions
+        # Grant SNS publish permissions with specific resources
         self.state_machine_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=["sns:Publish"],
-            resources=["*"]
+            resources=[
+                f"arn:aws:sns:{self.region}:{self.account}:*"
+            ]
         ))
         
         # API Gateway Role
@@ -535,10 +552,12 @@ class IAMStack(Stack):
                 "quicksight:DescribeAccountSettings",
                 "quicksight:DescribeUser"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:quicksight:{self.region}:{self.account}:*"
+            ]
         ))
         
-        # Athena permissions for QuickSight data source
+        # Athena permissions for QuickSight data source with specific resources
         self.quicksight_dashboard_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -553,10 +572,13 @@ class IAMStack(Stack):
                 "athena:GetQueryResults",
                 "athena:GetWorkGroup"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:athena:{self.region}:{self.account}:workgroup/*",
+                f"arn:aws:athena:{self.region}:{self.account}:datacatalog/*"
+            ]
         ))
         
-        # Glue catalog permissions for Athena
+        # Glue catalog permissions for Athena with specific resources
         self.quicksight_dashboard_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -566,7 +588,11 @@ class IAMStack(Stack):
                 "glue:GetTables",
                 "glue:GetPartitions"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                f"arn:aws:glue:{self.region}:{self.account}:database/*",
+                f"arn:aws:glue:{self.region}:{self.account}:table/*/*"
+            ]
         ))
         
         # S3 permissions for Athena query results
@@ -613,7 +639,7 @@ class IAMStack(Stack):
             ]
         ))
         
-        # Cost Explorer access for budget management
+        # Cost Explorer access for budget management - requires wildcard but add conditions
         self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -622,10 +648,15 @@ class IAMStack(Stack):
                 "pricing:GetProducts",
                 "pricing:DescribeServices"
             ],
-            resources=["*"]
+            resources=["*"],  # Cost Explorer APIs require wildcard
+            conditions={
+                "StringEquals": {
+                    "aws:RequestedRegion": self.region
+                }
+            }
         ))
         
-        # ECS permissions for CEO agent to orchestrate tasks
+        # ECS permissions for CEO agent to orchestrate tasks with specific resources
         self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -633,7 +664,11 @@ class IAMStack(Stack):
                 "ecs:StopTask",
                 "ecs:DescribeTasks"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:ecs:{self.region}:{self.account}:task/*",
+                f"arn:aws:ecs:{self.region}:{self.account}:task-definition/*",
+                f"arn:aws:ecs:{self.region}:{self.account}:cluster/*"
+            ]
         ))
         
         # Pass role permissions for ECS tasks
@@ -647,7 +682,7 @@ class IAMStack(Stack):
             ]
         ))
         
-        # EFS permissions for repository access
+        # EFS permissions for repository access with specific resources
         self.ceo_agent_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -655,7 +690,14 @@ class IAMStack(Stack):
                 "elasticfilesystem:ClientWrite",
                 "elasticfilesystem:DescribeMountTargets"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:elasticfilesystem:{self.region}:{self.account}:file-system/*"
+            ],
+            conditions={
+                "StringEquals": {
+                    "elasticfilesystem:AccessPointArn": f"arn:aws:elasticfilesystem:{self.region}:{self.account}:access-point/*"
+                }
+            }
         ))
         
         # Secrets Manager access for Git credentials
@@ -712,21 +754,32 @@ class IAMStack(Stack):
         scan_table.grant_read_write_data(self.report_generator_role)
         results_bucket.grant_read_write(self.report_generator_role)
         
-        # SES permissions for email reports
+        # SES permissions for email reports with specific resources
         self.report_generator_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
                 "ses:SendEmail",
                 "ses:SendRawEmail"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:ses:{self.region}:{self.account}:identity/*",
+                f"arn:aws:ses:{self.region}:{self.account}:configuration-set/*"
+            ],
+            conditions={
+                "StringEquals": {
+                    "ses:FromAddress": ["security-scans@*", "noreply@*"]
+                }
+            }
         ))
         
-        # SNS permissions for notifications
+        # SNS permissions for notifications with specific resources
         self.report_generator_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=["sns:Publish"],
-            resources=["*"]
+            resources=[
+                f"arn:aws:sns:{self.region}:{self.account}:*security*",
+                f"arn:aws:sns:{self.region}:{self.account}:*audit*"
+            ]
         ))
         
         # Lambda invoke permissions for QuickSight dashboard generation
@@ -752,7 +805,7 @@ class IAMStack(Stack):
         scan_table.grant_read_write_data(self.remediation_lambda_role)
         results_bucket.grant_read_write(self.remediation_lambda_role)
         
-        # IAM permissions for remediation actions
+        # IAM permissions for remediation actions with specific resources
         self.remediation_lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -761,29 +814,43 @@ class IAMStack(Stack):
                 "iam:TagUser",
                 "iam:TagRole"
             ],
-            resources=["*"],
+            resources=[
+                f"arn:aws:iam::{self.account}:user/*",
+                f"arn:aws:iam::{self.account}:role/*"
+            ],
             conditions={
                 "StringEquals": {
-                    "aws:RequestedRegion": self.region
+                    "aws:RequestedRegion": self.region,
+                    "iam:ResourceTag/SecurityAudit": "true"
                 }
             }
         ))
         
-        # Secrets Manager permissions for rotation
+        # Secrets Manager permissions for rotation with specific resources
         self.remediation_lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
                 "secretsmanager:RotateSecret",
                 "secretsmanager:UpdateSecretVersionStage"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:*"
+            ],
+            conditions={
+                "StringEquals": {
+                    "secretsmanager:ResourceTag/SecurityAudit": "true"
+                }
+            }
         ))
         
-        # SNS permissions for alerts
+        # SNS permissions for alerts with specific resources
         self.remediation_lambda_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=["sns:Publish"],
-            resources=["*"]
+            resources=[
+                f"arn:aws:sns:{self.region}:{self.account}:*security*",
+                f"arn:aws:sns:{self.region}:{self.account}:*alert*"
+            ]
         ))
         
         # Athena Setup Lambda Role
@@ -800,16 +867,40 @@ class IAMStack(Stack):
         scan_table.grant_read_write_data(self.athena_setup_role)
         results_bucket.grant_read_write(self.athena_setup_role)
         
-        # Athena permissions
+        # Athena permissions with specific resources
         self.athena_setup_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
-                "athena:*"
+                "athena:CreateWorkGroup",
+                "athena:DeleteWorkGroup",
+                "athena:GetWorkGroup",
+                "athena:UpdateWorkGroup",
+                "athena:StartQueryExecution",
+                "athena:StopQueryExecution",
+                "athena:GetQueryExecution",
+                "athena:GetQueryResults",
+                "athena:CreateNamedQuery",
+                "athena:DeleteNamedQuery",
+                "athena:GetNamedQuery",
+                "athena:ListNamedQueries",
+                "athena:BatchGetNamedQuery",
+                "athena:CreateDataCatalog",
+                "athena:DeleteDataCatalog",
+                "athena:GetDataCatalog",
+                "athena:GetDatabase",
+                "athena:GetTableMetadata",
+                "athena:ListDataCatalogs",
+                "athena:ListDatabases",
+                "athena:ListTableMetadata",
+                "athena:UpdateDataCatalog"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:athena:{self.region}:{self.account}:workgroup/*",
+                f"arn:aws:athena:{self.region}:{self.account}:datacatalog/*"
+            ]
         ))
         
-        # Glue permissions for database and table operations
+        # Glue permissions for database and table operations with specific resources
         self.athena_setup_role.add_to_policy(iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
@@ -831,7 +922,11 @@ class IAMStack(Stack):
                 "glue:DeletePartition",
                 "glue:BatchDeletePartition"
             ],
-            resources=["*"]
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                f"arn:aws:glue:{self.region}:{self.account}:database/security_audit*",
+                f"arn:aws:glue:{self.region}:{self.account}:table/security_audit*/*"
+            ]
         ))
         
         # S3 permissions for Athena query results and data access

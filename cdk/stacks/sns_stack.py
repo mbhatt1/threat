@@ -30,6 +30,15 @@ class SnsStack(Stack):
             display_name="Security Scan Request Topic",
             topic_name=f"security-scan-requests-{self.stack_name}"
         )
+        # Alias for backward compatibility
+        self.main_topic = self.scan_request_topic
+        
+        # Alert topic for monitoring and alarms
+        self.alert_topic = sns.Topic(
+            self, "AlertTopic",
+            display_name="Security Alert Topic",
+            topic_name=f"security-alerts-{self.stack_name}"
+        )
         
         # Subscribe SNS handler Lambda
         self.scan_request_topic.add_subscription(

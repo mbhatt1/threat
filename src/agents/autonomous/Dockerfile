@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser -u 1001 appuser
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     git \
@@ -24,6 +27,12 @@ COPY ../../shared /app/shared
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV AWS_DEFAULT_REGION=us-east-1
+
+# Change ownership of app directory
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
 
 # Run the agent
 CMD ["python", "agent.py"]

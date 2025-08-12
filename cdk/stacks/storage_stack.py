@@ -22,6 +22,40 @@ class StorageStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         
+        # Create S3 access logs bucket first
+        self.access_logs_bucket = s3.Bucket(
+            self, "S3AccessLogsBucket",
+            bucket_name=f"security-s3-access-logs-{self.account}-{self.region}",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,  # Access logs don't support KMS
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="DeleteOldAccessLogs",
+                    expiration=Duration.days(90),
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.GLACIER,
+                            transition_after=Duration.days(30)
+                        )
+                    ]
+                )
+            ],
+            removal_policy=RemovalPolicy.RETAIN,
+            enforce_ssl=True
+        )
+        
+        # Grant S3 log delivery permissions
+        self.access_logs_bucket.add_to_resource_policy(iam.PolicyStatement(
+            principals=[iam.ServicePrincipal("logging.s3.amazonaws.com")],
+            actions=["s3:PutObject"],
+            resources=[f"{self.access_logs_bucket.bucket_arn}/*"],
+            conditions={
+                "StringEquals": {
+                    "aws:SourceAccount": self.account
+                }
+            }
+        ))
+        
         # Create KMS key for encryption
         self.kms_key = kms.Key(
             self, "SecurityAuditKMSKey",
@@ -32,8 +66,53 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.RETAIN
         )
         
-        # Grant CloudWatch Logs access to KMS key
-        self.kms_key.grant_encrypt_decrypt(iam.ServicePrincipal("logs.amazonaws.com"))
+        # Add comprehensive key policy
+        self.kms_key.add_to_resource_policy(iam.PolicyStatement(
+            principals=[iam.AccountRootPrincipal()],
+            actions=["kms:*"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "kms:CallerAccount": self.account
+                }
+            }
+        ))
+        
+        # Grant CloudWatch Logs access to KMS key with conditions
+        self.kms_key.grant_encrypt_decrypt(
+            iam.ServicePrincipal("logs.amazonaws.com"),
+            conditions={
+                "StringEquals": {
+                    "kms:ViaService": f"logs.{self.region}.amazonaws.com"
+                }
+            }
+        )
+        
+        # Grant S3 service access for bucket encryption
+        self.kms_key.add_to_resource_policy(iam.PolicyStatement(
+            principals=[iam.ServicePrincipal("s3.amazonaws.com")],
+            actions=["kms:Decrypt", "kms:GenerateDataKey"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "kms:ViaService": f"s3.{self.region}.amazonaws.com",
+                    "aws:SourceAccount": self.account
+                }
+            }
+        ))
+        
+        # Grant DynamoDB service access for table encryption
+        self.kms_key.add_to_resource_policy(iam.PolicyStatement(
+            principals=[iam.ServicePrincipal("dynamodb.amazonaws.com")],
+            actions=["kms:Decrypt", "kms:GenerateDataKey", "kms:CreateGrant", "kms:DescribeKey"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "kms:ViaService": f"dynamodb.{self.region}.amazonaws.com",
+                    "aws:SourceAccount": self.account
+                }
+            }
+        ))
         
         # S3 bucket for scan results with KMS encryption
         self.results_bucket = s3.Bucket(
@@ -45,7 +124,9 @@ class StorageStack(Stack):
             versioned=True,
             lifecycle_rules=self._create_intelligent_lifecycle_rules(),
             removal_policy=RemovalPolicy.RETAIN,  # Retain bucket on stack deletion
-            enforce_ssl=True  # Enforce SSL for all requests
+            enforce_ssl=True,  # Enforce SSL for all requests
+            server_access_logs_bucket=self.access_logs_bucket,
+            server_access_logs_prefix="results-bucket/"
         )
         
         # Enable S3 Inventory for cost analysis with KMS encryption
@@ -196,6 +277,36 @@ class StorageStack(Stack):
                 type=dynamodb.AttributeType.STRING
             ),
             projection_type=dynamodb.ProjectionType.ALL
+        )
+        
+        # Create AI explanations table
+        self.explanations_table = dynamodb.Table(
+            self, "ExplanationsTable",
+            table_name=f"security-explanations-{self.account}-{self.region}",
+            partition_key=dynamodb.Attribute(
+                name="finding_id",
+                type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=self.kms_key,
+            removal_policy=RemovalPolicy.RETAIN,
+            point_in_time_recovery=True
+        )
+        
+        # Create business context table
+        self.business_context_table = dynamodb.Table(
+            self, "BusinessContextTable",
+            table_name=f"security-business-context-{self.account}-{self.region}",
+            partition_key=dynamodb.Attribute(
+                name="context_id",
+                type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=self.kms_key,
+            removal_policy=RemovalPolicy.RETAIN,
+            point_in_time_recovery=True
         )
         
         # AI-Powered Tables
@@ -688,7 +799,55 @@ class StorageStack(Stack):
                 )
             ],
             removal_policy=RemovalPolicy.RETAIN,
-            enforce_ssl=True
+            enforce_ssl=True,
+            server_access_logs_bucket=self.access_logs_bucket,
+            server_access_logs_prefix="policies-bucket/"
+        )
+        
+        # S3 bucket for reports with access logging
+        self.reports_bucket = s3.Bucket(
+            self, "ReportsBucket",
+            bucket_name=f"security-audit-reports-{self.account}-{self.region}",
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.kms_key,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            versioned=True,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="DeleteOldReports",
+                    expiration=Duration.days(365),
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.GLACIER,
+                            transition_after=Duration.days(90)
+                        )
+                    ]
+                )
+            ],
+            removal_policy=RemovalPolicy.RETAIN,
+            enforce_ssl=True,
+            server_access_logs_bucket=self.access_logs_bucket,
+            server_access_logs_prefix="reports-bucket/"
+        )
+        
+        # Athena results bucket with access logging
+        self.athena_results_bucket = s3.Bucket(
+            self, "AthenaResultsBucket",
+            bucket_name=f"security-athena-results-{self.account}-{self.region}",
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.kms_key,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="DeleteOldQueries",
+                    expiration=Duration.days(30)
+                )
+            ],
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            enforce_ssl=True,
+            server_access_logs_bucket=self.access_logs_bucket,
+            server_access_logs_prefix="athena-results/"
         )
         
         # Output AI table names

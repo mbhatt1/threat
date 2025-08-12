@@ -15,6 +15,10 @@ from stacks.api_stack import APIStack
 from stacks.sns_stack import SnsStack
 from stacks.monitoring_stack import MonitoringStack
 from stacks.bedrock_stack import BedrockSecurityStack
+from stacks.security_services_stack import SecurityServicesStack
+from stacks.parameters_stack import ParametersStack
+from stacks.security_hardening_stack import SecurityHardeningStack
+from stacks.certificate_stack import CertificateStack
 
 app = cdk.App()
 
@@ -69,6 +73,7 @@ lambda_stack = LambdaStack(
     efs_filesystem=network_stack.efs_filesystem,
     efs_access_point=network_stack.efs_access_point,
     lambda_security_group=network_stack.lambda_security_group,
+    kms_key=storage_stack.kms_key,  # Pass KMS key for environment variable encryption
     env=env,
     description="Lambda functions for AI security orchestration"
 )
@@ -124,6 +129,22 @@ bedrock_stack.add_dependency(network_stack)
 bedrock_stack.add_dependency(ecs_stack)
 bedrock_stack.add_dependency(storage_stack)
 
+# Parameters Stack for configuration values
+parameters_stack = ParametersStack(
+    app, f"{stack_prefix}-Parameters",
+    env=env,
+    description="SSM parameters and secrets for security audit framework"
+)
+
+# Security Services Stack (GuardDuty, Security Hub, Config, etc.)
+security_services_stack = SecurityServicesStack(
+    app, f"{stack_prefix}-SecurityServices",
+    results_bucket=storage_stack.results_bucket,
+    env=env,
+    description="AWS Security Services for enhanced protection and compliance"
+)
+security_services_stack.add_dependency(storage_stack)
+
 # Step Functions for workflow orchestration
 step_function_stack = StepFunctionStack(
     app, f"{stack_prefix}-StepFunctions",
@@ -154,33 +175,82 @@ api_stack = APIStack(
     state_machine=step_function_stack.state_machine,
     scan_table=storage_stack.scan_table,
     ai_security_analyzer_lambda=lambda_stack.ai_security_analyzer_lambda,
+    custom_authorizer_lambda=getattr(security_services_stack, 'custom_authorizer', None) if 'security_services_stack' in locals() else None,
+    kms_key=storage_stack.kms_key,  # Pass KMS key for CloudWatch logs encryption
     env=env,
     description="API Gateway for AI Security Audit Framework"
 )
 api_stack.add_dependency(lambda_stack)
 api_stack.add_dependency(iam_stack)
 api_stack.add_dependency(step_function_stack)
+if 'security_services_stack' in locals():
+    api_stack.add_dependency(security_services_stack)
+
+# Certificate management for HTTPS (optional - requires domain configuration)
+# To enable: Set DOMAIN_NAME environment variable to your domain (e.g., example.com)
+domain_name = os.getenv('DOMAIN_NAME')
+if domain_name:
+    certificate_stack = CertificateStack(
+        app, f"{stack_prefix}-Certificate",
+        domain_name=domain_name,
+        api=api_stack.api,
+        hosted_zone=None,  # Set to your Route53 hosted zone if available
+        env=env,
+        description="TLS/SSL certificate management for secure HTTPS endpoints"
+    )
+    certificate_stack.add_dependency(api_stack)
+    
+    # Output instructions for manual configuration
+    cdk.CfnOutput(
+        certificate_stack, "CertificateInstructions",
+        value="Certificate created. If not using Route53, manually validate certificate in ACM console and configure DNS.",
+        description="Certificate setup instructions"
+    )
+else:
+    # Output instructions for enabling HTTPS
+    cdk.CfnOutput(
+        api_stack, "HTTPSInstructions",
+        value="To enable HTTPS: Set DOMAIN_NAME environment variable and redeploy",
+        description="Instructions for enabling HTTPS with custom domain"
+    )
 
 # Monitoring and observability
 monitoring_stack = MonitoringStack(
     app, f"{stack_prefix}-Monitoring",
-    lambdas=[
-        lambda_stack.ceo_agent_lambda,
-        lambda_stack.aggregator_lambda,
-        lambda_stack.report_generator_lambda,
-        lambda_stack.remediation_lambda,
-        lambda_stack.quicksight_dashboard_lambda,
-        lambda_stack.athena_setup_lambda,
-        lambda_stack.data_transformer_lambda
-    ],
-    state_machine=step_function_stack.state_machine,
-    api=api_stack.api,
+    alert_topic=sns_stack.alert_topic,
+    lambdas={
+        "ceo_agent": lambda_stack.ceo_agent_lambda,
+        "aggregator": lambda_stack.aggregator_lambda,
+        "report_generator": lambda_stack.report_generator_lambda,
+        "remediation": lambda_stack.remediation_lambda,
+        "quicksight_dashboard": lambda_stack.quicksight_dashboard_lambda,
+        "athena_setup": lambda_stack.athena_setup_lambda,
+        "data_transformer": lambda_stack.data_transformer_lambda,
+        "ai_security_analyzer": lambda_stack.ai_security_analyzer_lambda,
+        "sns_handler": lambda_stack.sns_handler_lambda
+    },
+    tables={
+        "scan": storage_stack.scan_table,
+        "remediation": storage_stack.remediation_table,
+        "config": storage_stack.config_table,
+        "ai_decisions": storage_stack.ai_decisions_table,
+        "explanations": storage_stack.explanations_table,
+        "business_context": storage_stack.business_context_table,
+        "ai_scans": storage_stack.ai_scans_table,
+        "ai_findings": storage_stack.ai_findings_table
+    },
+    buckets={
+        "results": storage_stack.results_bucket,
+        "reports": storage_stack.reports_bucket,
+        "athena_results": storage_stack.athena_results_bucket
+    },
+    ecs_services=None,  # ECS services are task definitions, not services in this stack
     env=env,
     description="Monitoring for AI Security Audit Framework"
 )
 monitoring_stack.add_dependency(lambda_stack)
-monitoring_stack.add_dependency(step_function_stack)
-monitoring_stack.add_dependency(api_stack)
+monitoring_stack.add_dependency(storage_stack)
+monitoring_stack.add_dependency(sns_stack)
 
 # Output important values
 cdk.CfnOutput(
@@ -213,14 +283,46 @@ cdk.CfnOutput(
     description="S3 bucket for scan results"
 )
 
+# Security Hardening Stack for additional security measures
+security_hardening_stack = SecurityHardeningStack(
+    app, f"{stack_prefix}-SecurityHardening",
+    alert_topic=sns_stack.alert_topic,
+    lambdas={
+        "ceo_agent": lambda_stack.ceo_agent_lambda,
+        "aggregator": lambda_stack.aggregator_lambda,
+        "report_generator": lambda_stack.report_generator_lambda,
+        "remediation": lambda_stack.remediation_lambda,
+        "ai_security_analyzer": lambda_stack.ai_security_analyzer_lambda
+    },
+    tables={
+        "scan": storage_stack.scan_table,
+        "remediation": storage_stack.remediation_table,
+        "ai_findings": storage_stack.ai_findings_table,
+        "ai_scans": storage_stack.ai_scans_table
+    },
+    buckets={
+        "results": storage_stack.results_bucket,
+        "reports": storage_stack.reports_bucket,
+        "ai_policies": storage_stack.ai_policies_bucket
+    },
+    env=env,
+    description="Additional security hardening measures"
+)
+security_hardening_stack.add_dependency(sns_stack)
+security_hardening_stack.add_dependency(lambda_stack)
+security_hardening_stack.add_dependency(storage_stack)
+
 # Add tags to all stacks
-for stack in [network_stack, storage_stack, iam_stack, lambda_stack, 
-              ecs_stack, step_function_stack, api_stack, sns_stack, 
-              monitoring_stack]:
+for stack in [network_stack, storage_stack, iam_stack, lambda_stack,
+              ecs_stack, step_function_stack, api_stack, sns_stack,
+              monitoring_stack, bedrock_stack, security_services_stack,
+              parameters_stack, security_hardening_stack]:
     cdk.Tags.of(stack).add("Project", "AISecurityAudit")
     cdk.Tags.of(stack).add("Environment", os.getenv("ENVIRONMENT", "dev"))
     cdk.Tags.of(stack).add("ManagedBy", "CDK")
     cdk.Tags.of(stack).add("SecurityFramework", "Autonomous-AI-Agents")
     cdk.Tags.of(stack).add("AIModel", "Bedrock-Claude")
+    # Add backup tag for resources that should be backed up
+    cdk.Tags.of(stack).add("backup", "true")
 
 app.synth()

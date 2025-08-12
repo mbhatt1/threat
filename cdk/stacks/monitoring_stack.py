@@ -1,536 +1,443 @@
 """
-Monitoring Stack - CloudWatch dashboards, alarms, and event rules
+Monitoring Stack - CloudWatch Alarms and Dashboards for Security Audit Framework
 """
 from aws_cdk import (
     Stack,
-    aws_cloudwatch as cw,
-    aws_stepfunctions as sfn,
-    aws_apigateway as apigw,
-    aws_s3 as s3,
-    aws_dynamodb as dynamodb,
-    aws_sns as sns,
-    aws_cloudwatch_actions as cw_actions,
-    aws_events as events,
-    aws_events_targets as targets,
-    aws_lambda as lambda_,
     Duration,
-    CfnOutput
+    RemovalPolicy,
+    CfnOutput,
+    aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
+    aws_sns as sns,
+    aws_lambda as lambda_,
+    aws_logs as logs,
+    aws_dynamodb as dynamodb,
+    aws_s3 as s3,
+    aws_ecs as ecs
 )
 from constructs import Construct
-from typing import Optional
+from typing import List, Dict, Any
 
 
 class MonitoringStack(Stack):
-    """CloudWatch monitoring for Security Audit Framework"""
+    """CloudWatch alarms and monitoring for security audit framework"""
     
     def __init__(self, scope: Construct, construct_id: str,
-                 state_machine: sfn.StateMachine,
-                 api: apigw.RestApi,
-                 results_bucket: s3.Bucket,
-                 scan_table: dynamodb.Table,
-                 lifecycle_lambda: Optional[lambda_.Function] = None,
+                 alert_topic: sns.Topic,
+                 lambdas: Dict[str, lambda_.Function],
+                 tables: Dict[str, dynamodb.Table],
+                 buckets: Dict[str, s3.Bucket],
+                 ecs_services: Dict[str, ecs.FargateService] = None,
                  **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         
-        # SNS Topic for alarms
-        alarm_topic = sns.Topic(
-            self, "AlarmTopic",
-            topic_name="security-audit-alarms",
-            display_name="Security Audit Framework Alarms"
+        # Create composite alarms for critical failures
+        critical_alarm = cloudwatch.CompositeAlarm(
+            self, "CriticalSecurityAlarm",
+            composite_alarm_name="security-audit-critical-failures",
+            alarm_description="Critical security audit failures requiring immediate attention",
+            alarm_rule=cloudwatch.AlarmRule.any_of(
+                cloudwatch.AlarmRule.from_boolean(False)  # Placeholder, will add conditions
+            ),
+            actions_enabled=True
         )
         
-        # CloudWatch Dashboard
-        dashboard = cw.Dashboard(
-            self, "SecurityAuditDashboard",
-            dashboard_name="security-audit-overview",
-            default_interval=Duration.hours(6)
-        )
-        
-        # Step Functions Metrics
-        sfn_executions_metric = cw.Metric(
-            namespace="AWS/States",
-            metric_name="ExecutionsStarted",
-            dimensions_map={
-                "StateMachineArn": state_machine.state_machine_arn
-            },
-            statistic="Sum",
-            period=Duration.minutes(5)
-        )
-        
-        sfn_success_metric = cw.Metric(
-            namespace="AWS/States",
-            metric_name="ExecutionsSucceeded",
-            dimensions_map={
-                "StateMachineArn": state_machine.state_machine_arn
-            },
-            statistic="Sum",
-            period=Duration.minutes(5)
-        )
-        
-        sfn_failed_metric = cw.Metric(
-            namespace="AWS/States",
-            metric_name="ExecutionsFailed",
-            dimensions_map={
-                "StateMachineArn": state_machine.state_machine_arn
-            },
-            statistic="Sum",
-            period=Duration.minutes(5)
-        )
-        
-        sfn_duration_metric = cw.Metric(
-            namespace="AWS/States",
-            metric_name="ExecutionTime",
-            dimensions_map={
-                "StateMachineArn": state_machine.state_machine_arn
-            },
-            statistic="Average",
-            period=Duration.minutes(5)
-        )
-        
-        # API Gateway Metrics
-        api_requests_metric = cw.Metric(
-            namespace="AWS/ApiGateway",
-            metric_name="Count",
-            dimensions_map={
-                "ApiName": api.rest_api_name,
-                "Stage": "v1"
-            },
-            statistic="Sum",
-            period=Duration.minutes(5)
-        )
-        
-        api_4xx_metric = cw.Metric(
-            namespace="AWS/ApiGateway",
-            metric_name="4XXError",
-            dimensions_map={
-                "ApiName": api.rest_api_name,
-                "Stage": "v1"
-            },
-            statistic="Sum",
-            period=Duration.minutes(5)
-        )
-        
-        api_5xx_metric = cw.Metric(
-            namespace="AWS/ApiGateway",
-            metric_name="5XXError",
-            dimensions_map={
-                "ApiName": api.rest_api_name,
-                "Stage": "v1"
-            },
-            statistic="Sum",
-            period=Duration.minutes(5)
-        )
-        
-        api_latency_metric = cw.Metric(
-            namespace="AWS/ApiGateway",
-            metric_name="Latency",
-            dimensions_map={
-                "ApiName": api.rest_api_name,
-                "Stage": "v1"
-            },
-            statistic="Average",
-            period=Duration.minutes(5)
-        )
-        
-        # S3 Bucket Metrics
-        s3_bucket_size_metric = cw.Metric(
-            namespace="AWS/S3",
-            metric_name="BucketSizeBytes",
-            dimensions_map={
-                "BucketName": results_bucket.bucket_name,
-                "StorageType": "StandardStorage"
-            },
-            statistic="Average",
-            period=Duration.days(1)
-        )
-        
-        s3_request_metric = cw.Metric(
-            namespace="AWS/S3",
-            metric_name="AllRequests",
-            dimensions_map={
-                "BucketName": results_bucket.bucket_name
-            },
-            statistic="Sum",
-            period=Duration.minutes(5)
-        )
-        
-        # DynamoDB Metrics
-        dynamodb_consumed_read_metric = scan_table.metric_consumed_read_capacity_units()
-        dynamodb_consumed_write_metric = scan_table.metric_consumed_write_capacity_units()
-        dynamodb_throttled_requests = scan_table.metric_user_errors()
-        
-        # Custom Metrics (these would be published by Lambda functions)
-        findings_count_metric = cw.Metric(
-            namespace="SecurityAudit",
-            metric_name="TotalFindings",
-            statistic="Average",
-            period=Duration.minutes(5)
-        )
-        
-        critical_findings_metric = cw.Metric(
-            namespace="SecurityAudit",
-            metric_name="CriticalFindings",
-            statistic="Sum",
-            period=Duration.minutes(5)
-        )
-        
-        scan_cost_metric = cw.Metric(
-            namespace="SecurityAudit",
-            metric_name="ScanCost",
-            statistic="Average",
-            period=Duration.minutes(5),
-            unit=cw.Unit.COUNT  # Represents cents
-        )
-        
-        # Dashboard Widgets
-        
-        # Overview Section
-        dashboard.add_widgets(
-            cw.TextWidget(
-                markdown="# Security Audit Framework Dashboard\n\n**Real-time monitoring of security scans**",
-                width=24,
-                height=2
+        # Lambda Function Alarms
+        lambda_alarms = []
+        for name, function in lambdas.items():
+            # Error rate alarm
+            error_alarm = cloudwatch.Alarm(
+                self, f"{name}ErrorAlarm",
+                alarm_name=f"security-audit-{name}-errors",
+                alarm_description=f"High error rate for {name} Lambda",
+                metric=function.metric_errors(
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                ),
+                threshold=5,
+                evaluation_periods=2,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
             )
-        )
-        
-        # Execution Metrics Row
-        dashboard.add_widgets(
-            cw.GraphWidget(
-                title="Scan Executions",
-                left=[sfn_executions_metric],
-                width=8,
-                height=6
-            ),
-            cw.GraphWidget(
-                title="Success vs Failed Scans",
-                left=[sfn_success_metric],
-                right=[sfn_failed_metric],
-                width=8,
-                height=6
-            ),
-            cw.SingleValueWidget(
-                title="Average Scan Duration",
-                metrics=[sfn_duration_metric],
-                width=8,
-                height=6
+            error_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+            lambda_alarms.append(error_alarm)
+            
+            # Throttles alarm
+            throttle_alarm = cloudwatch.Alarm(
+                self, f"{name}ThrottleAlarm",
+                alarm_name=f"security-audit-{name}-throttles",
+                alarm_description=f"Lambda throttling detected for {name}",
+                metric=function.metric_throttles(
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                ),
+                threshold=1,
+                evaluation_periods=1,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
             )
-        )
-        
-        # API Metrics Row
-        dashboard.add_widgets(
-            cw.GraphWidget(
-                title="API Requests",
-                left=[api_requests_metric],
-                right=[api_4xx_metric, api_5xx_metric],
-                width=12,
-                height=6
-            ),
-            cw.GraphWidget(
-                title="API Latency",
-                left=[api_latency_metric],
-                width=12,
-                height=6
+            throttle_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+            
+            # Duration alarm (80% of timeout)
+            if hasattr(function, 'timeout') and function.timeout:
+                duration_threshold = function.timeout.to_seconds() * 0.8 * 1000  # Convert to milliseconds
+                duration_alarm = cloudwatch.Alarm(
+                    self, f"{name}DurationAlarm",
+                    alarm_name=f"security-audit-{name}-duration",
+                    alarm_description=f"Lambda approaching timeout for {name}",
+                    metric=function.metric_duration(
+                        period=Duration.minutes(5),
+                        statistic="Maximum"
+                    ),
+                    threshold=duration_threshold,
+                    evaluation_periods=2,
+                    comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                    treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
+                )
+                duration_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+            
+            # Concurrent executions alarm
+            concurrent_alarm = cloudwatch.Alarm(
+                self, f"{name}ConcurrentAlarm",
+                alarm_name=f"security-audit-{name}-concurrent",
+                alarm_description=f"High concurrent executions for {name}",
+                metric=function.metric("ConcurrentExecutions",
+                    period=Duration.minutes(5),
+                    statistic="Maximum"
+                ),
+                threshold=900,  # 90% of default limit
+                evaluation_periods=2,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
             )
-        )
+            concurrent_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
         
-        # Findings Metrics Row
-        dashboard.add_widgets(
-            cw.GraphWidget(
-                title="Security Findings",
-                left=[findings_count_metric],
-                right=[critical_findings_metric],
-                width=12,
-                height=6
-            ),
-            cw.GraphWidget(
-                title="Scan Costs ($)",
-                left=[scan_cost_metric.with_(statistic="Sum")],
-                width=12,
-                height=6
+        # DynamoDB Alarms
+        for name, table in tables.items():
+            # User errors alarm
+            user_errors_alarm = cloudwatch.Alarm(
+                self, f"{name}UserErrorsAlarm",
+                alarm_name=f"security-audit-{name}-user-errors",
+                alarm_description=f"High user error rate for {name} table",
+                metric=table.metric_user_errors(
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                ),
+                threshold=10,
+                evaluation_periods=2,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
             )
-        )
-        
-        # Storage Metrics Row
-        dashboard.add_widgets(
-            cw.GraphWidget(
-                title="S3 Bucket Size (GB)",
-                left=[s3_bucket_size_metric.with_(
-                    statistic="Average",
-                    period=Duration.days(1)
-                )],
-                width=12,
-                height=6
-            ),
-            cw.GraphWidget(
-                title="DynamoDB Capacity",
-                left=[dynamodb_consumed_read_metric],
-                right=[dynamodb_consumed_write_metric],
-                width=12,
-                height=6
+            user_errors_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+            
+            # System errors alarm
+            system_errors_alarm = cloudwatch.Alarm(
+                self, f"{name}SystemErrorsAlarm",
+                alarm_name=f"security-audit-{name}-system-errors",
+                alarm_description=f"System errors detected for {name} table",
+                metric=table.metric_system_errors(
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                ),
+                threshold=1,
+                evaluation_periods=1,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
             )
-        )
+            system_errors_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+            lambda_alarms.append(system_errors_alarm)
+            
+            # Throttled requests alarm
+            throttled_alarm = cloudwatch.Alarm(
+                self, f"{name}ThrottledAlarm",
+                alarm_name=f"security-audit-{name}-throttled",
+                alarm_description=f"Throttled requests for {name} table",
+                metric=cloudwatch.Metric(
+                    namespace="AWS/DynamoDB",
+                    metric_name="UserErrors",
+                    dimensions_map={
+                        "TableName": table.table_name,
+                        "ErrorType": "ResourceNotFoundException"
+                    },
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                ),
+                threshold=5,
+                evaluation_periods=2,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
+            )
+            throttled_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
         
-        # Alarms
+        # S3 Bucket Alarms
+        for name, bucket in buckets.items():
+            # 4xx errors alarm
+            errors_4xx_alarm = cloudwatch.Alarm(
+                self, f"{name}4xxErrorsAlarm",
+                alarm_name=f"security-audit-{name}-4xx-errors",
+                alarm_description=f"High 4xx error rate for {name} bucket",
+                metric=cloudwatch.Metric(
+                    namespace="AWS/S3",
+                    metric_name="4xxErrors",
+                    dimensions_map={
+                        "BucketName": bucket.bucket_name,
+                        "FilterId": "AllMetrics"
+                    },
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                ),
+                threshold=10,
+                evaluation_periods=2,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
+            )
+            errors_4xx_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+            
+            # 5xx errors alarm
+            errors_5xx_alarm = cloudwatch.Alarm(
+                self, f"{name}5xxErrorsAlarm",
+                alarm_name=f"security-audit-{name}-5xx-errors",
+                alarm_description=f"5xx errors detected for {name} bucket",
+                metric=cloudwatch.Metric(
+                    namespace="AWS/S3",
+                    metric_name="5xxErrors",
+                    dimensions_map={
+                        "BucketName": bucket.bucket_name,
+                        "FilterId": "AllMetrics"
+                    },
+                    period=Duration.minutes(5),
+                    statistic="Sum"
+                ),
+                threshold=1,
+                evaluation_periods=1,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
+            )
+            errors_5xx_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+            lambda_alarms.append(errors_5xx_alarm)
         
-        # Step Functions failure alarm
-        sfn_failure_alarm = cw.Alarm(
-            self, "StepFunctionFailureAlarm",
-            metric=sfn_failed_metric,
-            threshold=1,
-            evaluation_periods=1,
-            datapoints_to_alarm=1,
-            alarm_description="Security scan execution failed",
-            alarm_name="security-audit-scan-failed",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        sfn_failure_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
+        # ECS Service Alarms (if provided)
+        if ecs_services:
+            for name, service in ecs_services.items():
+                # CPU utilization alarm
+                cpu_alarm = cloudwatch.Alarm(
+                    self, f"{name}CpuAlarm",
+                    alarm_name=f"security-audit-{name}-cpu",
+                    alarm_description=f"High CPU utilization for {name} service",
+                    metric=service.metric_cpu_utilization(
+                        period=Duration.minutes(5),
+                        statistic="Average"
+                    ),
+                    threshold=80,
+                    evaluation_periods=3,
+                    comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                    treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
+                )
+                cpu_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+                
+                # Memory utilization alarm
+                memory_alarm = cloudwatch.Alarm(
+                    self, f"{name}MemoryAlarm",
+                    alarm_name=f"security-audit-{name}-memory",
+                    alarm_description=f"High memory utilization for {name} service",
+                    metric=service.metric_memory_utilization(
+                        period=Duration.minutes(5),
+                        statistic="Average"
+                    ),
+                    threshold=80,
+                    evaluation_periods=3,
+                    comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                    treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
+                )
+                memory_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
         
-        # High scan duration alarm
-        high_duration_alarm = cw.Alarm(
-            self, "HighScanDurationAlarm",
-            metric=sfn_duration_metric,
-            threshold=3600000,  # 1 hour in milliseconds
-            evaluation_periods=2,
-            datapoints_to_alarm=2,
-            alarm_description="Scan taking longer than 1 hour",
-            alarm_name="security-audit-high-duration",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        high_duration_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
+        # Security-specific alarms
         
-        # API 5xx errors alarm
-        api_error_alarm = cw.Alarm(
-            self, "ApiErrorAlarm",
-            metric=api_5xx_metric,
-            threshold=5,
-            evaluation_periods=2,
-            datapoints_to_alarm=1,
-            alarm_description="High API error rate",
-            alarm_name="security-audit-api-errors",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        api_error_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-        
-        # Critical findings alarm
-        critical_findings_alarm = cw.Alarm(
-            self, "CriticalFindingsAlarm",
-            metric=critical_findings_metric,
-            threshold=1,
-            evaluation_periods=1,
-            datapoints_to_alarm=1,
-            alarm_description="Critical security findings detected",
-            alarm_name="security-audit-critical-findings",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        critical_findings_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-        
-        # High cost alarm
-        high_cost_alarm = cw.Alarm(
-            self, "HighCostAlarm",
-            metric=scan_cost_metric.with_(
-                statistic="Sum",
-                period=Duration.hours(24)
-            ),
-            threshold=1000,  # $10 per day (in cents)
-            evaluation_periods=1,
-            datapoints_to_alarm=1,
-            alarm_description="Daily scan costs exceeding $10",
-            alarm_name="security-audit-high-cost",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        high_cost_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-        
-        # DynamoDB throttling alarm
-        dynamodb_throttle_alarm = cw.Alarm(
-            self, "DynamoDBThrottleAlarm",
-            metric=dynamodb_throttled_requests,
-            threshold=1,
-            evaluation_periods=2,
-            datapoints_to_alarm=2,
-            alarm_description="DynamoDB requests being throttled",
-            alarm_name="security-audit-dynamodb-throttle",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        dynamodb_throttle_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-        
-        # S3 bucket size alarm (warn at 100GB)
-        bucket_size_alarm = cw.Alarm(
-            self, "BucketSizeAlarm",
-            metric=s3_bucket_size_metric,
-            threshold=100 * 1024 * 1024 * 1024,  # 100GB in bytes
-            evaluation_periods=1,
-            datapoints_to_alarm=1,
-            alarm_description="S3 bucket size exceeding 100GB",
-            alarm_name="security-audit-bucket-size",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        bucket_size_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-        
-        # Create billing alarms for cost monitoring
-        self._create_billing_alarms(alarm_topic)
-        
-        # Create lifecycle event rules if lifecycle lambda is provided
-        if lifecycle_lambda:
-            self._create_lifecycle_event_rules(lifecycle_lambda, results_bucket)
-        
-        # Store alarm topic for other stacks
-        self.alarm_topic = alarm_topic
-        
-        # Outputs
-        CfnOutput(
-            self, "DashboardURL",
-            value=f"https://console.aws.amazon.com/cloudwatch/home?region={self.region}#dashboards:name={dashboard.dashboard_name}",
-            description="CloudWatch Dashboard URL"
-        )
-        
-        CfnOutput(
-            self, "AlarmTopicArn",
-            value=alarm_topic.topic_arn,
-            description="SNS topic for alarm notifications"
-        )
-    
-    def _create_billing_alarms(self, alarm_topic: sns.Topic):
-        """Create CloudWatch billing alarms for cost monitoring"""
-        
-        # Overall account billing alarm
-        account_billing_alarm = cw.Alarm(
-            self, "AccountBillingAlarm",
-            metric=cw.Metric(
-                namespace="AWS/Billing",
-                metric_name="EstimatedCharges",
-                dimensions_map={
-                    "Currency": "USD"
-                },
-                statistic="Maximum",
-                period=Duration.hours(6)
-            ),
-            threshold=1000,  # $1000 threshold
-            evaluation_periods=1,
-            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            alarm_description="Alert when AWS account charges exceed $1000",
-            alarm_name="security-audit-account-billing",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        account_billing_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-        
-        # Security scan specific billing alarm
-        scan_cost_hourly_alarm = cw.Alarm(
-            self, "ScanCostHourlyAlarm",
-            metric=cw.Metric(
+        # Failed scan attempts alarm
+        failed_scans_alarm = cloudwatch.Alarm(
+            self, "FailedScansAlarm",
+            alarm_name="security-audit-failed-scans",
+            alarm_description="Multiple scan failures detected",
+            metric=cloudwatch.Metric(
                 namespace="SecurityAudit",
-                metric_name="ScanCost",
-                statistic="Sum",
-                period=Duration.hours(1)
+                metric_name="ScanFailures",
+                period=Duration.minutes(15),
+                statistic="Sum"
             ),
-            threshold=5000,  # $50 per hour (in cents)
-            evaluation_periods=2,
-            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            alarm_description="Alert when security scan costs exceed $50/hour",
-            alarm_name="security-audit-scan-cost-hourly",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
-        )
-        scan_cost_hourly_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-        
-        # Panic threshold - immediate action required
-        panic_billing_alarm = cw.Alarm(
-            self, "PanicBillingAlarm",
-            metric=cw.Metric(
-                namespace="AWS/Billing",
-                metric_name="EstimatedCharges",
-                dimensions_map={
-                    "Currency": "USD"
-                },
-                statistic="Maximum",
-                period=Duration.hours(1)
-            ),
-            threshold=5000,  # $5000 panic threshold
+            threshold=3,
             evaluation_periods=1,
-            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            alarm_description="PANIC: AWS charges exceed $5000 - immediate action required",
-            alarm_name="security-audit-panic-billing",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
         )
-        panic_billing_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
+        failed_scans_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+        lambda_alarms.append(failed_scans_alarm)
         
-        # S3 storage cost alarm
-        s3_storage_cost_alarm = cw.Alarm(
-            self, "S3StorageCostAlarm",
-            metric=cw.Metric(
-                namespace="AWS/Billing",
-                metric_name="EstimatedCharges",
-                dimensions_map={
-                    "Currency": "USD",
-                    "ServiceName": "AmazonS3"
-                },
-                statistic="Maximum",
-                period=Duration.days(1)
+        # High vulnerability count alarm
+        high_vuln_alarm = cloudwatch.Alarm(
+            self, "HighVulnerabilityAlarm",
+            alarm_name="security-audit-high-vulnerabilities",
+            alarm_description="High number of critical vulnerabilities detected",
+            metric=cloudwatch.Metric(
+                namespace="SecurityAudit",
+                metric_name="CriticalVulnerabilities",
+                period=Duration.hours(1),
+                statistic="Maximum"
             ),
-            threshold=100,  # $100 per day for S3
+            threshold=10,
             evaluation_periods=1,
-            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            alarm_description="S3 storage costs exceeding $100/day",
-            alarm_name="security-audit-s3-cost",
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
         )
-        s3_storage_cost_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
-    
-    def _create_lifecycle_event_rules(self, lifecycle_lambda: lambda_.Function, results_bucket: s3.Bucket):
-        """Create CloudWatch Events rules for lifecycle management"""
+        high_vuln_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+        lambda_alarms.append(high_vuln_alarm)
         
-        # Daily review of recent scans
-        daily_review_rule = events.Rule(
-            self, "DailyLifecycleReview",
-            description="Daily review of S3 lifecycle tags",
-            schedule=events.Schedule.cron(
-                minute="0",
-                hour="3",  # 3 AM UTC
-                week_day="*",
-                month="*",
-                year="*"
+        # Unauthorized access attempts alarm
+        unauthorized_alarm = cloudwatch.Alarm(
+            self, "UnauthorizedAccessAlarm",
+            alarm_name="security-audit-unauthorized-access",
+            alarm_description="Unauthorized access attempts detected",
+            metric=cloudwatch.Metric(
+                namespace="SecurityAudit",
+                metric_name="UnauthorizedAccess",
+                period=Duration.minutes(5),
+                statistic="Sum"
+            ),
+            threshold=5,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
+        )
+        unauthorized_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+        lambda_alarms.append(unauthorized_alarm)
+        
+        # Data exfiltration alarm
+        data_exfil_alarm = cloudwatch.Alarm(
+            self, "DataExfiltrationAlarm",
+            alarm_name="security-audit-data-exfiltration",
+            alarm_description="Potential data exfiltration detected",
+            metric=cloudwatch.Metric(
+                namespace="SecurityAudit",
+                metric_name="LargeDataTransfer",
+                period=Duration.minutes(10),
+                statistic="Maximum"
+            ),
+            threshold=1073741824,  # 1GB
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING
+        )
+        data_exfil_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+        lambda_alarms.append(data_exfil_alarm)
+        
+        # Update composite alarm with all critical alarms
+        if lambda_alarms:
+            critical_alarm = cloudwatch.CompositeAlarm(
+                self, "UpdatedCriticalSecurityAlarm",
+                composite_alarm_name="security-audit-critical-composite",
+                alarm_description="Composite alarm for all critical security failures",
+                alarm_rule=cloudwatch.AlarmRule.any_of(*lambda_alarms),
+                actions_enabled=True
             )
+            critical_alarm.add_alarm_action(cw_actions.SnsAction(alert_topic))
+        
+        # Create monitoring dashboard
+        dashboard = cloudwatch.Dashboard(
+            self, "SecurityMonitoringDashboard",
+            dashboard_name="security-audit-monitoring",
+            widgets=[
+                [
+                    cloudwatch.TextWidget(
+                        markdown="# Security Audit Framework Monitoring\n\nReal-time monitoring of security scanning and analysis operations",
+                        width=24,
+                        height=2
+                    )
+                ],
+                [
+                    cloudwatch.AlarmStatusWidget(
+                        title="Critical Alarms Status",
+                        alarms=lambda_alarms[:5],  # Show top 5 critical alarms
+                        width=12,
+                        height=6
+                    ),
+                    cloudwatch.GraphWidget(
+                        title="Lambda Error Rates",
+                        left=[function.metric_errors() for _, function in list(lambdas.items())[:3]],
+                        width=12,
+                        height=6
+                    )
+                ],
+                [
+                    cloudwatch.GraphWidget(
+                        title="Scan Success/Failure Rate",
+                        left=[
+                            cloudwatch.Metric(
+                                namespace="SecurityAudit",
+                                metric_name="ScanSuccess",
+                                statistic="Sum",
+                                period=Duration.minutes(5)
+                            ),
+                            cloudwatch.Metric(
+                                namespace="SecurityAudit",
+                                metric_name="ScanFailures",
+                                statistic="Sum",
+                                period=Duration.minutes(5)
+                            )
+                        ],
+                        width=12,
+                        height=6
+                    ),
+                    cloudwatch.GraphWidget(
+                        title="Vulnerability Trends",
+                        left=[
+                            cloudwatch.Metric(
+                                namespace="SecurityAudit",
+                                metric_name="CriticalVulnerabilities",
+                                statistic="Sum",
+                                period=Duration.hours(1)
+                            ),
+                            cloudwatch.Metric(
+                                namespace="SecurityAudit",
+                                metric_name="HighVulnerabilities",
+                                statistic="Sum",
+                                period=Duration.hours(1)
+                            ),
+                            cloudwatch.Metric(
+                                namespace="SecurityAudit",
+                                metric_name="MediumVulnerabilities",
+                                statistic="Sum",
+                                period=Duration.hours(1)
+                            )
+                        ],
+                        width=12,
+                        height=6
+                    )
+                ],
+                [
+                    cloudwatch.LogQueryWidget(
+                        title="Recent Security Events",
+                        log_group_names=[f"/aws/lambda/{name}" for name in lambdas.keys()],
+                        query_string="""
+                        fields @timestamp, @message
+                        | filter @message like /ERROR|CRITICAL|SECURITY/
+                        | sort @timestamp desc
+                        | limit 20
+                        """,
+                        width=24,
+                        height=6
+                    )
+                ]
+            ]
         )
         
-        daily_review_rule.add_target(
-            targets.LambdaFunction(
-                lifecycle_lambda,
-                event=events.RuleTargetInput.from_object({
-                    "source": "aws.events",
-                    "action": "scheduled_review",
-                    "days": 7
-                })
-            )
+        # Output alarm ARNs for integration
+        CfnOutput(
+            self, "CriticalAlarmArn",
+            value=critical_alarm.alarm_arn,
+            export_name="security-audit-critical-alarm-arn"
         )
         
-        # Weekly deep review
-        weekly_review_rule = events.Rule(
-            self, "WeeklyLifecycleReview",
-            description="Weekly deep review of all S3 objects",
-            schedule=events.Schedule.cron(
-                minute="0",
-                hour="4",  # 4 AM UTC
-                week_day="SUN",  # Sunday
-                month="*",
-                year="*"
-            )
-        )
-        
-        weekly_review_rule.add_target(
-            targets.LambdaFunction(
-                lifecycle_lambda,
-                event=events.RuleTargetInput.from_object({
-                    "source": "aws.events",
-                    "action": "scheduled_review",
-                    "days": 30
-                })
-            )
-        )
-        
-        # S3 event notifications for new objects
-        results_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            targets.LambdaDestination(lifecycle_lambda),
-            s3.NotificationKeyFilter(
-                prefix="raw/",
-                suffix=".json"
-            )
+        CfnOutput(
+            self, "DashboardUrl",
+            value=f"https://console.aws.amazon.com/cloudwatch/home?region={self.region}#dashboards:name={dashboard.dashboard_name}",
+            export_name="security-audit-dashboard-url"
         )

@@ -12,6 +12,8 @@ from pathlib import Path
 from botocore.exceptions import ClientError
 from functools import wraps
 import time
+import re
+from urllib.parse import urlparse
 
 # Add parent directories to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -86,10 +88,10 @@ class AICEOAgent:
     async def process_scan_request(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Process scan request and orchestrate AI-based security scanning"""
         
-        # Extract scan configuration
-        repository_url = event.get('repository_url')
-        branch = event.get('branch', 'main')
-        scan_options = event.get('scan_options', {})
+        # Validate and sanitize input
+        repository_url = self._validate_repository_url(event.get('repository_url'))
+        branch = self._validate_branch(event.get('branch', 'main'))
+        scan_options = self._validate_scan_options(event.get('scan_options', {}))
         
         if not repository_url:
             raise ValueError("repository_url is required in the event")
@@ -398,52 +400,186 @@ Return a JSON object with the strategy:
             'reasoning': 'Default balanced strategy for unknown repository'
         }
     
+    def _validate_repository_url(self, url: str) -> str:
+        """Validate and sanitize repository URL"""
+        if not url:
+            return None
+            
+        # Remove any whitespace
+        url = url.strip()
+        
+        # Parse and validate URL
+        try:
+            parsed = urlparse(url)
+            
+            # Only allow HTTPS and SSH protocols
+            if parsed.scheme not in ['https', 'ssh', 'git']:
+                raise ValueError(f"Invalid repository URL scheme: {parsed.scheme}. Only HTTPS, SSH, and Git protocols are allowed.")
+            
+            # Validate hostname
+            if not parsed.hostname:
+                raise ValueError("Invalid repository URL: missing hostname")
+            
+            # Check for common Git hosting services
+            allowed_hosts = [
+                'github.com', 'gitlab.com', 'bitbucket.org', 'codecommit',
+                'github.enterprise.com', 'gitlab.enterprise.com'
+            ]
+            
+            if not any(host in parsed.hostname for host in allowed_hosts):
+                # For private repositories, ensure it's not a local file path
+                if parsed.hostname in ['localhost', '127.0.0.1', '::1']:
+                    raise ValueError("Local repository URLs are not allowed")
+            
+            # Validate path - prevent directory traversal
+            if parsed.path:
+                if '..' in parsed.path or parsed.path.startswith('/etc/') or parsed.path.startswith('/root/'):
+                    raise ValueError("Invalid repository path")
+                
+                # Ensure path matches valid repository pattern
+                if not re.match(r'^[/a-zA-Z0-9._\-]+$', parsed.path):
+                    raise ValueError("Repository path contains invalid characters")
+            
+            return url
+            
+        except Exception as e:
+            raise ValueError(f"Invalid repository URL: {str(e)}")
+    
+    def _validate_branch(self, branch: str) -> str:
+        """Validate and sanitize branch name"""
+        if not branch:
+            return 'main'
+            
+        # Remove whitespace
+        branch = branch.strip()
+        
+        # Validate branch name format
+        if not re.match(r'^[a-zA-Z0-9/_\-\.]+$', branch):
+            raise ValueError(f"Invalid branch name: {branch}")
+        
+        # Prevent special Git references that could be abused
+        if branch.startswith('.') or branch in ['HEAD', 'FETCH_HEAD', 'ORIG_HEAD']:
+            raise ValueError(f"Invalid branch name: {branch}")
+        
+        # Limit branch name length
+        if len(branch) > 255:
+            raise ValueError("Branch name too long (max 255 characters)")
+        
+        return branch
+    
+    def _validate_scan_options(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and sanitize scan options"""
+        if not isinstance(options, dict):
+            return {}
+        
+        validated_options = {}
+        
+        # Whitelist allowed options
+        allowed_options = {
+            'incremental': bool,
+            'pr_scan': bool,
+            'deep_scan': bool,
+            'quick_scan': bool,
+            'priority': str,
+            'commit_hash': str,
+            'base_branch': str,
+            'triggered_by': str,
+            'max_file_size': int,
+            'exclude_patterns': list
+        }
+        
+        for key, expected_type in allowed_options.items():
+            if key in options:
+                value = options[key]
+                
+                # Type validation
+                if not isinstance(value, expected_type):
+                    continue
+                
+                # Additional validation based on option
+                if key == 'priority' and value not in ['low', 'normal', 'high', 'critical']:
+                    continue
+                    
+                if key == 'commit_hash' and value:
+                    # Validate commit hash format
+                    if not re.match(r'^[a-f0-9]{7,40}$', value):
+                        continue
+                        
+                if key == 'base_branch':
+                    try:
+                        value = self._validate_branch(value)
+                    except ValueError:
+                        continue
+                        
+                if key == 'triggered_by' and value not in ['manual', 'webhook', 'schedule', 'api']:
+                    value = 'manual'
+                    
+                if key == 'max_file_size' and (value < 0 or value > 100 * 1024 * 1024):  # Max 100MB
+                    value = 10 * 1024 * 1024  # Default 10MB
+                    
+                if key == 'exclude_patterns' and isinstance(value, list):
+                    # Validate patterns
+                    validated_patterns = []
+                    for pattern in value[:10]:  # Limit to 10 patterns
+                        if isinstance(pattern, str) and len(pattern) < 100:
+                            # Basic pattern validation
+                            if not re.match(r'^[a-zA-Z0-9\*\?\.\-_/]+$', pattern):
+                                continue
+                            validated_patterns.append(pattern)
+                    value = validated_patterns
+                
+                validated_options[key] = value
+        
+        return validated_options
+
     async def _clone_repository(self, repository_url: str, branch: str, target_path: str):
         """Clone repository for scanning"""
         import subprocess
+        import shutil
         
         # Create target directory
         os.makedirs(target_path, exist_ok=True)
         
-        # Clone repository (simplified - in production use git2 or similar)
+        # Clone repository with security measures
         try:
-            # For demo purposes, just create some sample files
-            sample_files = {
-                'app.py': """
-import os
-import sqlite3
-
-def get_user(user_id):
-    # Potential SQL injection
-    query = f"SELECT * FROM users WHERE id = {user_id}"
-    conn = sqlite3.connect('database.db')
-    return conn.execute(query).fetchone()
-
-# Hardcoded secret
-API_KEY = "sk-1234567890abcdef"
-""",
-                'requirements.txt': """
-flask==2.0.1
-requests==2.25.1
-sqlalchemy==1.3.23
-""",
-                'Dockerfile': """
-FROM python:3.8
-WORKDIR /app
-COPY . .
-RUN pip install -r requirements.txt
-USER root
-CMD ["python", "app.py"]
-"""
-            }
+            # Use Git with security flags
+            git_command = [
+                'git', 'clone',
+                '--depth', '1',  # Shallow clone
+                '--single-branch',
+                '--branch', branch,
+                '--no-tags',  # Don't fetch tags
+                repository_url,
+                target_path
+            ]
             
-            for filename, content in sample_files.items():
-                with open(os.path.join(target_path, filename), 'w') as f:
-                    f.write(content)
-                    
+            # Set security environment variables
+            env = os.environ.copy()
+            env.update({
+                'GIT_TERMINAL_PROMPT': '0',  # Disable password prompts
+                'GIT_ASKPASS': '/bin/echo',   # Disable password prompts
+                'GIT_SSH_COMMAND': 'ssh -o StrictHostKeyChecking=accept-new'  # Auto-accept new hosts
+            })
+            
+            # Execute with timeout
+            result = subprocess.run(
+                git_command,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode != 0:
+                raise Exception(f"Git clone failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            raise Exception("Repository clone timed out after 5 minutes")
         except Exception as e:
-            print(f"Repository clone failed: {e}")
-            raise
+            # Cleanup on failure
+            if os.path.exists(target_path):
+                shutil.rmtree(target_path)
+            raise Exception(f"Repository clone failed: {str(e)}")
 
 
 def handler(event, context):
@@ -457,17 +593,54 @@ def handler(event, context):
     asyncio.set_event_loop(loop)
     
     try:
+        # Input validation for event structure
+        if not isinstance(event, dict):
+            return {
+                'statusCode': 400,
+                'body': json.dumps({'error': 'Invalid event format'})
+            }
+        
         # Handle different event sources
         if 'Records' in event:
             # SNS event
+            if not isinstance(event.get('Records'), list):
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps({'error': 'Invalid Records format'})
+                }
+                
             results = []
-            for record in event['Records']:
-                message = json.loads(record['Sns']['Message'])
-                result = loop.run_until_complete(ceo.process_scan_request(message))
-                results.append(result)
+            for record in event['Records'][:10]:  # Process max 10 records
+                try:
+                    if 'Sns' in record and 'Message' in record['Sns']:
+                        message = json.loads(record['Sns']['Message'])
+                        result = loop.run_until_complete(ceo.process_scan_request(message))
+                        results.append(result)
+                except json.JSONDecodeError:
+                    results.append({
+                        'error': 'Invalid JSON in SNS message',
+                        'record': record.get('Sns', {}).get('MessageId', 'unknown')
+                    })
+                except Exception as e:
+                    results.append({
+                        'error': f'Processing failed: {str(e)}',
+                        'record': record.get('Sns', {}).get('MessageId', 'unknown')
+                    })
             return results
         else:
             # Direct invocation
             return loop.run_until_complete(ceo.process_scan_request(event))
+            
+    except ValueError as e:
+        return {
+            'statusCode': 400,
+            'body': json.dumps({'error': str(e)})
+        }
+    except Exception as e:
+        print(f"Handler error: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': 'Internal server error'})
+        }
     finally:
         loop.close()
