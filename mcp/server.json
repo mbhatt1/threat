@@ -1,0 +1,137 @@
+{
+  "name": "security-scanner",
+  "version": "1.0.0",
+  "description": "AI-powered security scanning MCP server using AWS Bedrock",
+  "author": "Security Audit Framework Team",
+  "license": "MIT",
+  "main": "security-scanner-server.py",
+  "runtime": "python",
+  "python": {
+    "version": ">=3.9",
+    "requirements": "requirements.txt"
+  },
+  "tools": [
+    {
+      "name": "scan_repository",
+      "description": "Perform comprehensive AI-powered security scan on a repository",
+      "parameters": {
+        "repository_url": {
+          "type": "string",
+          "description": "URL of the repository to scan",
+          "required": true
+        },
+        "scan_type": {
+          "type": "string",
+          "description": "Type of scan (full, incremental, pr)",
+          "default": "full"
+        },
+        "branch": {
+          "type": "string",
+          "description": "Branch to scan",
+          "default": "main"
+        },
+        "focus_areas": {
+          "type": "array",
+          "description": "Specific areas to focus on",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "check_vulnerabilities",
+      "description": "Quick AI-powered vulnerability check on a code snippet",
+      "parameters": {
+        "code_snippet": {
+          "type": "string",
+          "description": "Code to analyze",
+          "required": true
+        },
+        "language": {
+          "type": "string",
+          "description": "Programming language",
+          "default": "python"
+        },
+        "context": {
+          "type": "string",
+          "description": "Additional context about the code"
+        }
+      }
+    },
+    {
+      "name": "check_dependencies",
+      "description": "Check dependencies for known vulnerabilities",
+      "parameters": {
+        "package_file_content": {
+          "type": "string",
+          "description": "Content of package file",
+          "required": true
+        },
+        "package_type": {
+          "type": "string",
+          "description": "Type of package file",
+          "default": "requirements.txt"
+        }
+      }
+    },
+    {
+      "name": "check_infrastructure",
+      "description": "Check infrastructure as code for security misconfigurations",
+      "parameters": {
+        "iac_content": {
+          "type": "string",
+          "description": "Infrastructure code content",
+          "required": true
+        },
+        "iac_type": {
+          "type": "string",
+          "description": "Type of IaC (terraform, cloudformation, kubernetes)",
+          "default": "terraform"
+        }
+      }
+    },
+    {
+      "name": "generate_report",
+      "description": "Generate a security report from scan results",
+      "parameters": {
+        "scan_id": {
+          "type": "string",
+          "description": "ID of the scan to generate report for",
+          "required": true
+        },
+        "report_type": {
+          "type": "string",
+          "description": "Type of report (executive, technical, compliance)",
+          "default": "executive"
+        }
+      }
+    }
+  ],
+  "resources": [
+    {
+      "uri": "security://scans",
+      "name": "Security Scans",
+      "description": "List all available security scans"
+    },
+    {
+      "uri": "security://policies",
+      "name": "Security Policies",
+      "description": "Get current security policies"
+    }
+  ],
+  "capabilities": {
+    "tools": true,
+    "resources": true,
+    "prompts": false,
+    "sampling": false
+  },
+  "environment": {
+    "AWS_REGION": "${AWS_REGION:-us-east-1}",
+    "BEDROCK_MODEL_ID": "${BEDROCK_MODEL_ID:-anthropic.claude-3-sonnet-20240229-v1:0}",
+    "RESULTS_BUCKET": "${RESULTS_BUCKET}",
+    "SCAN_TABLE": "${SCAN_TABLE:-SecurityScans}",
+    "AI_SCANS_TABLE": "${AI_SCANS_TABLE:-SecurityAuditAIScans}",
+    "AI_FINDINGS_TABLE": "${AI_FINDINGS_TABLE:-SecurityAuditAIFindings}"
+  }
+}
