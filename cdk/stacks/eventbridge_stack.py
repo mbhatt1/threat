@@ -21,6 +21,7 @@ class EventBridgeStack(Stack):
     def __init__(self, scope: Construct, construct_id: str,
                  ecr_scanning_lambda: lambda_.Function = None,
                  cloudwatch_insights_lambda: lambda_.Function = None,
+                 ai_security_analyzer_lambda: lambda_.Function = None,
                  alert_topic: sns.Topic = None,
                  **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -47,6 +48,55 @@ class EventBridgeStack(Stack):
                     ecr_scanning_lambda,
                     retry_attempts=2,
                     max_event_age=Duration.hours(1)
+                )
+            )
+            
+        # AI Security Analysis Trigger Rule (including Hephaestus)
+        if ai_security_analyzer_lambda:
+            ai_security_rule = events.Rule(
+                self, "AISecurityAnalysisRule",
+                rule_name="security-audit-ai-analysis",
+                description="Trigger AI security analysis including Hephaestus cognitive scan",
+                event_pattern=events.EventPattern(
+                    source=["threat.security"],
+                    detail_type=[
+                        "AI Security Analysis Request",
+                        "Hephaestus Analysis Request",
+                        "Deep Vulnerability Scan"
+                    ]
+                )
+            )
+            
+            # Add Lambda target
+            ai_security_rule.add_target(
+                targets.LambdaFunction(
+                    ai_security_analyzer_lambda,
+                    retry_attempts=1,  # Reduce retries due to long-running analysis
+                    max_event_age=Duration.hours(2)
+                )
+            )
+            
+            # Scheduled Hephaestus scan rule (weekly)
+            scheduled_hephaestus_rule = events.Rule(
+                self, "ScheduledHephaestusRule",
+                rule_name="security-audit-hephaestus-weekly",
+                description="Weekly Hephaestus cognitive vulnerability scan",
+                schedule=events.Schedule.rate(Duration.days(7))
+            )
+            
+            # Add Lambda target with default configuration
+            scheduled_hephaestus_rule.add_target(
+                targets.LambdaFunction(
+                    ai_security_analyzer_lambda,
+                    event=events.RuleTargetInput.from_object({
+                        "action": "hephaestus_cognitive",
+                        "payload": {
+                            "repository_s3_bucket": f"security-audit-results-{self.account}-{self.region}",
+                            "repository_s3_key": "repositories/main-app.zip",
+                            "max_iterations": 2,
+                            "severity_filter": "high"
+                        }
+                    })
                 )
             )
             

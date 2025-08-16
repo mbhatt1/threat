@@ -153,6 +153,7 @@ eventbridge_stack = EventBridgeStack(
     app, f"{stack_prefix}-EventBridge",
     ecr_scanning_lambda=lambda_stack.ecr_scanning_lambda,
     cloudwatch_insights_lambda=lambda_stack.cloudwatch_insights_lambda,
+    ai_security_analyzer_lambda=lambda_stack.ai_security_analyzer_lambda,
     alert_topic=sns_stack.alert_topic,
     env=env,
     description="EventBridge rules for automated security scanning triggers"

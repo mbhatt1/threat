@@ -22,3 +22,9 @@ aiofiles
 
 # Logging
 python-json-logger>=2.0.0
+
+# Graph analysis for vulnerability chains (Hephaestus AI)
+networkx>=3.0
+
+# Note: Hephaestus AI now uses AWS Bedrock instead of OpenAI
+# Bedrock is accessed via boto3 which is already included above

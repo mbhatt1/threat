@@ -14,7 +14,8 @@ from aws_cdk import (
     aws_lambda_destinations as lambda_destinations,
     aws_kms as kms,
     Duration,
-    RemovalPolicy
+    RemovalPolicy,
+    Size
 )
 from constructs import Construct
 import os
@@ -262,16 +263,19 @@ class LambdaStack(Stack):
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             environment={
                 **common_env,
-                "BEDROCK_MODEL_ID": "anthropic.claude-3-haiku-20240307-v1:0",
+                "BEDROCK_MODEL_ID": "anthropic.claude-3-sonnet-20240229-v1:0",  # Hephaestus default
                 "MAX_CONCURRENT_REQUESTS": "10",
-                "ANALYSIS_TIMEOUT": "300"
+                "ANALYSIS_TIMEOUT": "300",
+                "HEPHAESTUS_MAX_FILES": "20",  # Limit files per batch for Hephaestus
+                "HEPHAESTUS_DEFAULT_ITERATIONS": "2"  # Default cognitive iterations
             },
             environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(15),
-            memory_size=1024,
+            memory_size=3008,  # Increased for Hephaestus cognitive analysis
+            ephemeral_storage_size=Size.gibibytes(5),  # 5GB for processing large repos
             layers=[shared_layer],
             log_retention=logs.RetentionDays.TWO_WEEKS,
-            description="AI-powered security analysis using AWS Bedrock"
+            description="AI-powered security analysis using AWS Bedrock with Hephaestus Cognitive AI"
         )
         
         # Make AI Security Analyzer Lambda accessible
@@ -407,7 +411,8 @@ class LambdaStack(Stack):
             code=lambda_.Code.from_asset("../src/lambdas/sns_handler"),
             environment={
                 "STATE_MACHINE_ARN": "",  # Will be set after step function creation
-                "SCAN_TABLE_NAME": scan_table.table_name
+                "SCAN_TABLE_NAME": scan_table.table_name,
+                "AI_SECURITY_ANALYZER_LAMBDA_ARN": self.ai_security_analyzer_lambda.function_arn
             },
             environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.seconds(60),
@@ -424,6 +429,7 @@ class LambdaStack(Stack):
         
         # Grant permissions for SNS handler
         scan_table.grant_read_write_data(self.sns_handler_lambda)
+        self.ai_security_analyzer_lambda.grant_invoke(self.sns_handler_lambda)
         
         # ECR Scanning Enabler Lambda
         self.ecr_scanning_lambda = lambda_python.PythonFunction(

@@ -391,7 +391,7 @@ class APIStack(Stack):
                 properties={
                     "action": apigw.JsonSchema(
                         type=apigw.JsonSchemaType.STRING,
-                        enum=["analyze_sql", "threat_intel", "root_cause", "pure_ai", "sandbox", "test_generator"]
+                        enum=["analyze_sql", "threat_intel", "root_cause", "pure_ai", "sandbox", "test_generator", "hephaestus_cognitive"]
                     ),
                     "payload": apigw.JsonSchema(
                         type=apigw.JsonSchemaType.OBJECT
@@ -473,6 +473,20 @@ class APIStack(Stack):
         # Test Generator endpoint
         test_generator_resource = v1_ai_resource.add_resource("test-generator")
         test_generator_resource.add_method(
+            "POST",
+            ai_integration,
+            request_models={"application/json": ai_request_model},
+            method_responses=[
+                apigw.MethodResponse(status_code="200"),
+                apigw.MethodResponse(status_code="400"),
+                apigw.MethodResponse(status_code="500")
+            ],
+            authorization_type=apigw.AuthorizationType.IAM
+        )
+        
+        # Hephaestus Cognitive Analysis endpoint
+        hephaestus_resource = v1_ai_resource.add_resource("hephaestus-cognitive")
+        hephaestus_resource.add_method(
             "POST",
             ai_integration,
             request_models={"application/json": ai_request_model},

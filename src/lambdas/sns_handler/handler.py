@@ -22,6 +22,7 @@ sqs_client = boto3.client('sqs')
 # Environment variables
 STATE_MACHINE_ARN = os.environ.get('STATE_MACHINE_ARN')
 CEO_AGENT_LAMBDA = os.environ.get('CEO_AGENT_LAMBDA_ARN')
+AI_SECURITY_ANALYZER_LAMBDA = os.environ.get('AI_SECURITY_ANALYZER_LAMBDA_ARN')
 SCAN_TABLE = os.environ.get('SCAN_TABLE', 'SecurityScans')
 NOTIFICATION_TABLE = os.environ.get('NOTIFICATION_TABLE', 'SecurityNotifications')
 DLQ_URL = os.environ.get('DLQ_URL')
@@ -44,7 +45,9 @@ class SNSMessageHandler:
             'status_update': self._handle_status_update,
             'integration': self._handle_integration,
             'scheduled_scan': self._handle_scheduled_scan,
-            'manual_trigger': self._handle_manual_trigger
+            'manual_trigger': self._handle_manual_trigger,
+            'ai_security_analysis': self._handle_ai_security_analysis,
+            'hephaestus_analysis': self._handle_hephaestus_analysis
         }
     
     def process_sns_message(self, sns_message: Dict[str, Any]) -> Dict[str, Any]:
@@ -473,6 +476,86 @@ class SNSMessageHandler:
         message_data['scan_options']['trigger_reason'] = reason
         
         return self._handle_scan_request(message_data, sns_message)
+    
+    def _handle_ai_security_analysis(self, message_data: Dict, sns_message: Dict) -> Dict[str, Any]:
+        """Handle AI security analysis requests"""
+        
+        if not AI_SECURITY_ANALYZER_LAMBDA:
+            raise ValueError("AI_SECURITY_ANALYZER_LAMBDA_ARN not configured")
+        
+        # Extract analysis configuration
+        analysis_config = {
+            'action': message_data.get('action', 'analyze_sql'),
+            'payload': message_data.get('payload', {}),
+            'triggered_by': 'sns',
+            'sns_message_id': sns_message.get('MessageId')
+        }
+        
+        # Invoke AI Security Analyzer Lambda
+        response = lambda_client.invoke(
+            FunctionName=AI_SECURITY_ANALYZER_LAMBDA,
+            InvocationType='Event',  # Async
+            Payload=json.dumps(analysis_config)
+        )
+        
+        return {
+            'action': 'ai_analysis_triggered',
+            'status_code': response['StatusCode'],
+            'analysis_type': analysis_config['action']
+        }
+    
+    def _handle_hephaestus_analysis(self, message_data: Dict, sns_message: Dict) -> Dict[str, Any]:
+        """Handle Hephaestus cognitive vulnerability analysis requests"""
+        
+        if not AI_SECURITY_ANALYZER_LAMBDA:
+            raise ValueError("AI_SECURITY_ANALYZER_LAMBDA_ARN not configured")
+        
+        # Extract Hephaestus configuration
+        hephaestus_config = {
+            'action': 'hephaestus_cognitive',
+            'payload': {
+                'repository_url': message_data.get('repository_url'),
+                'branch': message_data.get('branch', 'main'),
+                'scan_type': message_data.get('scan_type', 'full'),
+                'max_vulnerabilities': message_data.get('max_vulnerabilities', 10),
+                'enable_evolution': message_data.get('enable_evolution', True),
+                'custom_patterns': message_data.get('custom_patterns', [])
+            },
+            'triggered_by': 'sns',
+            'sns_message_id': sns_message.get('MessageId')
+        }
+        
+        # Validate required fields
+        if not hephaestus_config['payload']['repository_url']:
+            raise ValueError("repository_url is required for Hephaestus analysis")
+        
+        # Invoke AI Security Analyzer Lambda with Hephaestus action
+        response = lambda_client.invoke(
+            FunctionName=AI_SECURITY_ANALYZER_LAMBDA,
+            InvocationType='Event',  # Async due to long-running analysis
+            Payload=json.dumps(hephaestus_config)
+        )
+        
+        # Store analysis request in DynamoDB
+        scan_id = f"hephaestus-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{hashlib.md5(hephaestus_config['payload']['repository_url'].encode()).hexdigest()[:8]}"
+        
+        self.scan_table.put_item(
+            Item={
+                'scan_id': scan_id,
+                'scan_type': 'hephaestus_cognitive',
+                'status': 'INITIATED',
+                'repository_url': hephaestus_config['payload']['repository_url'],
+                'initiated_at': datetime.utcnow().isoformat(),
+                'triggered_by': 'sns',
+                'config': hephaestus_config
+            }
+        )
+        
+        return {
+            'action': 'hephaestus_analysis_triggered',
+            'status_code': response['StatusCode'],
+            'scan_id': scan_id
+        }
     
     def _handle_unknown_message(self, message_data: Dict, sns_message: Dict) -> Dict[str, Any]:
         """Handle unknown message types"""

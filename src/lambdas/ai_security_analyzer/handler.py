@@ -10,6 +10,7 @@ import boto3
 from pathlib import Path
 import asyncio
 from typing import Dict, Any, List
+from datetime import datetime
 
 # Add parent directories to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -21,6 +22,7 @@ from ai_models.root_cause_analyzer import AIRootCauseAnalyzer
 from ai_models.pure_ai_detector import PureAIVulnerabilityDetector
 from ai_models.ai_security_sandbox import AISecuritySandbox
 from ai_models.security_test_generator import AISecurityTestGenerator
+from ai_models.hephaestus_ai_cognitive_bedrock import HephaestusCognitiveAI
 
 # Initialize components
 sql_detector = SQLInjectionDetector()
@@ -29,6 +31,9 @@ root_cause = AIRootCauseAnalyzer()
 pure_ai = PureAIVulnerabilityDetector()
 sandbox = AISecuritySandbox()
 test_generator = AISecurityTestGenerator()
+
+# Initialize Hephaestus (will use AWS credentials from Lambda environment)
+hephaestus_ai = HephaestusCognitiveAI()
 
 
 def handler(event, context):
@@ -58,6 +63,12 @@ def handler(event, context):
             # For sandbox:
             "vulnerability": {vulnerability details},
             "test_cases": [list of test cases]
+            
+            # For hephaestus_cognitive:
+            "repository_s3_bucket": "bucket-name",
+            "repository_s3_key": "path/to/repo.zip",
+            "max_iterations": 2,
+            "severity_filter": "critical"  # optional: critical, high, medium, low
         }
     }
     """
@@ -77,6 +88,8 @@ def handler(event, context):
             return handle_sandbox_testing(payload)
         elif action == 'test_generator':
             return handle_test_generation(payload)
+        elif action == 'hephaestus_cognitive':
+            return handle_hephaestus_cognitive(payload)
         else:
             return {
                 'statusCode': 400,
@@ -84,7 +97,8 @@ def handler(event, context):
                     'error': f'Unknown action: {action}',
                     'available_actions': [
                         'analyze_sql', 'threat_intel', 'root_cause',
-                        'pure_ai', 'sandbox', 'test_generator'
+                        'pure_ai', 'sandbox', 'test_generator',
+                        'hephaestus_cognitive'
                     ]
                 })
             }
@@ -400,4 +414,152 @@ def handle_test_generation(payload: Dict[str, Any]) -> Dict[str, Any]:
         
     finally:
         loop.close()
+
+
+def handle_hephaestus_cognitive(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle Hephaestus Cognitive AI analysis
+    This advanced system uses 6-phase cognitive flow for deep vulnerability discovery
+    """
+    s3_bucket = payload.get('repository_s3_bucket')
+    s3_key = payload.get('repository_s3_key')
+    max_iterations = payload.get('max_iterations', 2)
+    severity_filter = payload.get('severity_filter')
+    
+    # Check if we have S3 location or local path
+    if not s3_bucket and not payload.get('repository_path'):
+        return {
+            'statusCode': 400,
+            'body': json.dumps({
+                'error': 'Either repository_s3_bucket/key or repository_path is required'
+            })
+        }
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        # If S3 location provided, download the repository
+        if s3_bucket and s3_key:
+            s3_client = boto3.client('s3')
+            # Download to /tmp in Lambda
+            local_path = f"/tmp/{s3_key.split('/')[-1]}"
+            s3_client.download_file(s3_bucket, s3_key, local_path)
+            
+            # Extract if it's a zip file
+            if local_path.endswith('.zip'):
+                import zipfile
+                extract_path = '/tmp/repo'
+                with zipfile.ZipFile(local_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_path)
+                repo_path = extract_path
+            else:
+                repo_path = local_path
+        else:
+            repo_path = payload.get('repository_path')
+        
+        # Run Hephaestus analysis
+        results = loop.run_until_complete(
+            hephaestus_ai.analyze(repo_path, max_iterations)
+        )
+        
+        # Filter by severity if requested
+        chains = results['chains']
+        if severity_filter:
+            severity_order = ['critical', 'high', 'medium', 'low']
+            filter_index = severity_order.index(severity_filter)
+            chains = [c for c in chains
+                     if severity_order.index(c.severity) <= filter_index]
+        
+        # Prepare response (limit size for Lambda response)
+        response_chains = []
+        for chain in chains[:50]:  # Limit to first 50 chains
+            response_chains.append({
+                'id': chain.id,
+                'title': chain.title,
+                'description': chain.description,
+                'severity': chain.severity,
+                'confidence': chain.confidence,
+                'phase': chain.innovation_phase,
+                'iteration': chain.discovery_iteration,
+                'impact': chain.impact,
+                'steps': chain.steps[:5],  # Limit steps for response size
+                'functions_count': len(chain.functions_involved),
+                'entry_points_count': len(chain.entry_points),
+                'exploitation_techniques': chain.exploitation_techniques[:5],
+                'has_poc': bool(chain.poc_code)
+            })
+        
+        # Store full results in S3 if needed
+        result_s3_key = None
+        if len(chains) > 50 or any(chain.poc_code for chain in chains):
+            # Store full results including POCs in S3
+            result_bucket = os.environ.get('RESULTS_BUCKET', s3_bucket)
+            result_key = f"hephaestus-results/{context.request_id}.json"
+            
+            # Convert chains to serializable format
+            full_results = {
+                'repository': repo_path,
+                'analysis_time': datetime.utcnow().isoformat(),
+                'total_chains': len(chains),
+                'iterations_completed': results['iterations_completed'],
+                'by_severity': results['report']['by_severity'],
+                'by_phase': results['report']['by_phase'],
+                'chains': [
+                    {
+                        'id': c.id,
+                        'title': c.title,
+                        'description': c.description,
+                        'severity': c.severity,
+                        'confidence': c.confidence,
+                        'steps': c.steps,
+                        'impact': c.impact,
+                        'exploit_scenario': c.exploit_scenario,
+                        'mitigations': c.mitigations,
+                        'code_locations': c.code_locations,
+                        'attack_path': c.attack_path,
+                        'functions_involved': c.functions_involved,
+                        'entry_points': c.entry_points,
+                        'exploitation_techniques': c.exploitation_techniques,
+                        'innovation_phase': c.innovation_phase,
+                        'discovery_iteration': c.discovery_iteration,
+                        'poc_code': c.poc_code
+                    }
+                    for c in chains
+                ]
+            }
+            
+            s3_client.put_object(
+                Bucket=result_bucket,
+                Key=result_key,
+                Body=json.dumps(full_results, indent=2),
+                ContentType='application/json'
+            )
+            result_s3_key = f"s3://{result_bucket}/{result_key}"
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'analysis_complete': True,
+                'total_vulnerability_chains': results['total_chains'],
+                'iterations_completed': results['iterations_completed'],
+                'by_severity': results['report']['by_severity'],
+                'by_phase': dict(results['report']['by_phase']),
+                'critical_chains_count': len([c for c in chains if c.severity == 'critical']),
+                'chains': response_chains,
+                'full_results_s3': result_s3_key,
+                'message': f"Hephaestus discovered {results['total_chains']} vulnerability chains using {results['iterations_completed']} cognitive iterations"
+            })
+        }
+        
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'error': f'Hephaestus analysis failed: {str(e)}',
+                'error_type': type(e).__name__
+            })
+        }
+        
+    finally:
         loop.close()
