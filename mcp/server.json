@@ -1,226 +1,162 @@
 {
-  "mcpServers": {
-    "security-scanner": {
-      "command": "python",
-      "args": ["-m", "mcp.security-scanner-server"],
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}",
-        "MCP_SERVER_MODE": "stdio"
-      },
-      "metadata": {
-        "name": "Security Scanner MCP Server",
-        "version": "1.0.0",
-        "description": "MCP server for AI-powered security scanning capabilities",
-        "author": "AI Security Team"
-      }
-    },
-    "bedrock-security": {
-      "command": "python",
-      "args": ["${workspaceFolder}/mcp/bedrock-security-mcp.py"],
-      "env": {
-        "AWS_REGION": "${AWS_REGION}",
-        "MCP_SERVER_MODE": "stdio"
-      },
-      "metadata": {
-        "name": "Bedrock Security MCP Server",
-        "version": "1.0.0",
-        "description": "MCP server for AWS Bedrock security analysis",
-        "author": "AI Security Team"
-      }
+  "name": "security-audit-mcp",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server for AI Security Audit Framework",
+  "author": "Security Team",
+  "license": "MIT",
+  "server": {
+    "command": "python",
+    "args": ["-m", "mcp.server"],
+    "env": {
+      "MCP_SERVER_NAME": "security-audit",
+      "LOG_LEVEL": "INFO"
     }
   },
-  "tools": {
-    "scan_repository": {
-      "description": "Scan a repository for security vulnerabilities",
+  "tools": [
+    {
+      "name": "scan_repository",
+      "description": "Scan a git repository for security vulnerabilities",
       "inputSchema": {
         "type": "object",
         "properties": {
           "repository_url": {
             "type": "string",
-            "description": "URL of the repository to scan"
+            "description": "Git repository URL"
           },
           "branch": {
             "type": "string",
             "description": "Branch to scan",
             "default": "main"
           },
-          "priority": {
+          "scan_type": {
             "type": "string",
-            "enum": ["low", "normal", "high", "critical"],
-            "default": "normal"
-          },
-          "agents": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "enum": ["sast", "dependency", "secrets", "iac", "container", "all"]
-            },
-            "default": ["all"]
+            "enum": ["quick", "standard", "comprehensive", "hephaestus"],
+            "default": "standard"
           }
         },
         "required": ["repository_url"]
       }
     },
-    "get_scan_results": {
-      "description": "Retrieve results of a security scan",
+    {
+      "name": "analyze_vulnerability",
+      "description": "Analyze a specific vulnerability in detail",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "scan_id": {
+          "vulnerability_id": {
             "type": "string",
-            "description": "ID of the scan to retrieve"
+            "description": "Unique vulnerability identifier"
           },
-          "format": {
-            "type": "string",
-            "enum": ["json", "sarif", "html"],
-            "default": "json"
+          "include_remediation": {
+            "type": "boolean",
+            "default": true
           }
         },
-        "required": ["scan_id"]
+        "required": ["vulnerability_id"]
       }
     },
-    "list_scans": {
-      "description": "List recent security scans",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "repository_url": {
-            "type": "string",
-            "description": "Filter by repository URL"
-          },
-          "status": {
-            "type": "string",
-            "enum": ["pending", "running", "completed", "failed"],
-            "description": "Filter by scan status"
-          },
-          "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 100,
-            "default": 10
-          }
-        }
-      }
-    },
-    "analyze_vulnerability": {
-      "description": "Get AI-powered analysis of a specific vulnerability",
+    {
+      "name": "remediate_finding",
+      "description": "Apply automated remediation for a security finding",
       "inputSchema": {
         "type": "object",
         "properties": {
           "finding_id": {
             "type": "string",
-            "description": "ID of the vulnerability finding"
+            "description": "Security finding ID"
           },
-          "include_remediation": {
+          "dry_run": {
             "type": "boolean",
-            "default": true
-          },
-          "include_business_impact": {
-            "type": "boolean",
+            "description": "Preview changes without applying",
             "default": true
           }
         },
         "required": ["finding_id"]
       }
     },
-    "generate_remediation": {
-      "description": "Generate remediation code for vulnerabilities",
+    {
+      "name": "get_scan_status",
+      "description": "Get the status of a security scan",
       "inputSchema": {
         "type": "object",
         "properties": {
           "scan_id": {
             "type": "string",
-            "description": "ID of the scan"
-          },
-          "finding_ids": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "List of finding IDs to remediate"
-          },
-          "auto_apply": {
-            "type": "boolean",
-            "default": false,
-            "description": "Automatically apply remediation (requires confirmation)"
+            "description": "Scan identifier"
           }
         },
         "required": ["scan_id"]
       }
     },
-    "create_security_report": {
-      "description": "Generate a comprehensive security report",
+    {
+      "name": "list_recent_scans",
+      "description": "List recent security scans",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "scan_ids": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "List of scan IDs to include in report"
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of scans to return",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 100
           },
-          "format": {
+          "status": {
             "type": "string",
-            "enum": ["pdf", "html", "markdown"],
-            "default": "html"
-          },
-          "include_charts": {
-            "type": "boolean",
-            "default": true
-          },
-          "executive_summary": {
-            "type": "boolean",
-            "default": true
+            "enum": ["pending", "running", "completed", "failed"],
+            "description": "Filter by scan status"
           }
-        },
-        "required": ["scan_ids"]
+        }
       }
     }
-  },
-  "resources": {
-    "security-policies": {
-      "uri": "security://policies",
-      "name": "Security Policies",
-      "description": "Active security policies and compliance frameworks",
+  ],
+  "resources": [
+    {
+      "uri": "security://scans",
+      "name": "Security Scans",
+      "description": "Access to security scan results and history",
       "mimeType": "application/json"
     },
-    "vulnerability-database": {
+    {
       "uri": "security://vulnerabilities",
       "name": "Vulnerability Database",
-      "description": "Known vulnerabilities and CVE information",
+      "description": "Known vulnerabilities and threat intelligence",
       "mimeType": "application/json"
     },
-    "scan-history": {
-      "uri": "security://history",
-      "name": "Scan History",
-      "description": "Historical security scan data and trends",
-      "mimeType": "application/json"
-    },
-    "remediation-templates": {
+    {
       "uri": "security://remediations",
-      "name": "Remediation Templates",
-      "description": "Code templates for common vulnerability fixes",
+      "name": "Remediation Library",
+      "description": "Automated remediation templates and scripts",
       "mimeType": "application/json"
+    },
+    {
+      "uri": "security://reports",
+      "name": "Security Reports",
+      "description": "Generated security assessment reports",
+      "mimeType": "application/pdf"
     }
+  ],
+  "capabilities": {
+    "streaming": true,
+    "cancellation": true,
+    "progress": true,
+    "tools": true,
+    "resources": true
   },
   "configuration": {
-    "stdio": {
-      "transport": "stdio",
-      "encoding": "utf-8"
+    "aws_region": {
+      "type": "string",
+      "description": "AWS region for API calls",
+      "default": "us-east-1"
     },
-    "sse": {
-      "transport": "sse",
-      "url": "${MCP_SERVER_URL}",
-      "headers": {
-        "Authorization": "Bearer ${MCP_API_KEY}"
-      }
+    "api_endpoint": {
+      "type": "string",
+      "description": "Security audit API endpoint URL"
     },
-    "capabilities": {
-      "tools": true,
-      "resources": true,
-      "prompts": false,
-      "sampling": false
+    "auth_method": {
+      "type": "string",
+      "enum": ["iam", "api_key"],
+      "default": "iam"
     }
   }
 }

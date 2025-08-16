@@ -280,7 +280,9 @@ class LambdaStack(Stack):
                 "MAX_CONCURRENT_REQUESTS": "10",
                 "ANALYSIS_TIMEOUT": "300",
                 "HEPHAESTUS_MAX_FILES": "20",  # Limit files per batch for Hephaestus
-                "HEPHAESTUS_DEFAULT_ITERATIONS": "2"  # Default cognitive iterations
+                "HEPHAESTUS_DEFAULT_ITERATIONS": "2",  # Default cognitive iterations
+                "EXPLANATIONS_TABLE": f"security-explanations-{self.account}-{self.region}",
+                "METRICS_BUCKET": f"security-audit-metrics-{self.account}-{self.region}"
             },
             environment_encryption=kms_key,  # Encrypt environment variables with KMS
             timeout=Duration.minutes(15),
@@ -443,6 +445,36 @@ class LambdaStack(Stack):
         # Grant permissions for SNS handler
         scan_table.grant_read_write_data(self.sns_handler_lambda)
         self.ai_security_analyzer_lambda.grant_invoke(self.sns_handler_lambda)
+        
+        # Security Lake Lambda for OCSF data ingestion
+        self.security_lake_lambda = lambda_.Function(
+            self, "SecurityLakeLambda",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("../src/lambdas/security_lake"),
+            environment={
+                **common_env,
+                "SECURITY_LAKE_BUCKET": f"aws-security-data-lake-{self.region}-{self.account}",
+                "SECURITY_LAKE_PREFIX": "ext/SecurityAudit",
+                "SECURITY_LAKE_DATABASE": "aws_security_lake",
+                "SECURITY_LAKE_TABLE": "security_findings"
+            },
+            environment_encryption=kms_key,
+            timeout=Duration.seconds(60),
+            memory_size=512,
+            layers=[shared_layer],
+            log_retention=logs.RetentionDays.ONE_WEEK,
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+            security_groups=[lambda_security_group],
+            description="Processes security findings and writes to Security Lake in OCSF format"
+        )
+        
+        # Grant Security Lake Lambda permissions
+        results_bucket.grant_read(self.security_lake_lambda)
+        scan_table.grant_read_data(self.security_lake_lambda)
         
         # ECR Scanning Enabler Lambda
         self.ecr_scanning_lambda = lambda_python.PythonFunction(

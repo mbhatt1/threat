@@ -305,6 +305,30 @@ class EventBridgeStack(Stack):
                 )
             )
         
+        # Rule for ECR repository creation - enable scanning
+        if ecr_scanning_lambda:
+            ecr_repo_created_rule = events.Rule(
+                self, "ECRRepoCreatedRule",
+                rule_name="security-audit-ecr-repo-created",
+                description="Enable vulnerability scanning when ECR repository is created",
+                event_pattern=events.EventPattern(
+                    source=["aws.ecr"],
+                    detail_type=["AWS API Call via CloudTrail"],
+                    detail={
+                        "eventSource": ["ecr.amazonaws.com"],
+                        "eventName": ["CreateRepository"]
+                    }
+                )
+            )
+            
+            ecr_repo_created_rule.add_target(
+                targets.LambdaFunction(
+                    ecr_scanning_lambda,
+                    retry_attempts=2,
+                    max_event_age=Duration.hours(1)
+                )
+            )
+        
         # Rule for root account usage
         root_usage_rule = events.Rule(
             self, "RootAccountUsageRule",
