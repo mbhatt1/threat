@@ -1,299 +1,323 @@
-name: AI Security Scan
+name: Security Audit Scan
 
 on:
+  # Run on every push to main/master and develop branches
   push:
-    branches: [ main, develop ]
+    branches:
+      - main
+      - master
+      - develop
+  
+  # Run on pull requests
   pull_request:
-    branches: [ main ]
-  schedule:
-    # Run daily security scan at 2 AM UTC
-    - cron: '0 2 * * *'
+    types: [opened, synchronize, reopened]
+  
+  # Allow manual trigger
   workflow_dispatch:
     inputs:
-      priority:
-        description: 'Scan priority'
-        required: false
-        default: 'normal'
+      scan_type:
+        description: 'Type of security scan to run'
+        required: true
+        default: 'standard'
         type: choice
         options:
-          - low
-          - normal
-          - high
-          - critical
-      agents:
-        description: 'Agents to run (comma-separated)'
+          - quick
+          - standard
+          - comprehensive
+          - hephaestus
+      
+      target_branch:
+        description: 'Branch to scan'
         required: false
-        default: 'all'
+        default: 'main'
+        type: string
+  
+  # Scheduled daily scan at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * *'
 
 env:
   AWS_REGION: us-east-1
-  SCAN_PRIORITY: ${{ github.event.inputs.priority || 'normal' }}
-  SCAN_AGENTS: ${{ github.event.inputs.agents || 'all' }}
+  PYTHON_VERSION: '3.11'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  actions: read
 
 jobs:
   security-scan:
-    name: Run AI Security Scan
+    name: AI Security Audit
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-      issues: write
-      pull-requests: write
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Full history for better analysis
-    
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
-    
-    - name: Install AI Security CLI
-      run: |
-        pip install --upgrade pip
-        pip install -e .
-    
-    - name: Validate configuration
-      run: |
-        ai-security validate --config .security/config.json
-    
-    - name: Run security scan
-      id: scan
-      env:
-        API_ENDPOINT: ${{ secrets.SECURITY_API_ENDPOINT }}
-        API_AUTH_TOKEN: ${{ secrets.SECURITY_API_TOKEN }}
-      run: |
-        SCAN_OUTPUT=$(ai-security scan \
-          --repository-url "https://github.com/${{ github.repository }}" \
-          --branch "${{ github.ref_name }}" \
-          --commit "${{ github.sha }}" \
-          --priority "${{ env.SCAN_PRIORITY }}" \
-          --agents "${{ env.SCAN_AGENTS }}" \
-          --output-format json \
-          --wait)
-        
-        echo "scan_output<<EOF" >> $GITHUB_OUTPUT
-        echo "$SCAN_OUTPUT" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-        
-        # Extract scan ID
-        SCAN_ID=$(echo "$SCAN_OUTPUT" | jq -r '.scan_id')
-        echo "scan_id=$SCAN_ID" >> $GITHUB_OUTPUT
-    
-    - name: Upload SARIF results
-      if: always()
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: security-reports/scan-results.sarif
-        category: ai-security-scan
-    
-    - name: Generate security report
-      if: always()
-      run: |
-        ai-security report \
-          --scan-id "${{ steps.scan.outputs.scan_id }}" \
-          --format html \
-          --output security-reports/report.html
-    
-    - name: Upload security report
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: security-report-${{ github.run_number }}
-        path: security-reports/
-        retention-days: 30
-    
-    - name: Comment on PR
-      if: github.event_name == 'pull_request'
-      uses: actions/github-script@v7
-      env:
-        SCAN_OUTPUT: ${{ steps.scan.outputs.scan_output }}
-      with:
-        script: |
-          const scanResults = JSON.parse(process.env.SCAN_OUTPUT);
-          const { summary, findings } = scanResults;
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better analysis
+          ref: ${{ github.event.inputs.target_branch || github.ref }}
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov safety bandit
+      
+      - name: Run Pre-scan Checks
+        run: |
+          # Check for sensitive data
+          echo "Checking for sensitive data..."
+          git secrets --scan || true
           
-          // Build comment body
-          let comment = '## 🔒 AI Security Scan Results\n\n';
+          # Check dependencies for vulnerabilities
+          echo "Checking dependencies..."
+          safety check --json || true
+      
+      - name: Determine Scan Type
+        id: scan-config
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            SCAN_TYPE="${{ github.event.inputs.scan_type }}"
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            SCAN_TYPE="comprehensive"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            SCAN_TYPE="standard"
+          else
+            SCAN_TYPE="quick"
+          fi
+          echo "scan_type=$SCAN_TYPE" >> $GITHUB_OUTPUT
+          echo "Running $SCAN_TYPE security scan..."
+      
+      - name: Execute Security Scan
+        id: security-scan
+        env:
+          SCAN_TYPE: ${{ steps.scan-config.outputs.scan_type }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create scan request
+          SCAN_ID=$(uuidgen)
+          REPO_URL="https://github.com/${{ github.repository }}"
           
-          // Summary table
-          comment += '### Summary\n';
-          comment += '| Severity | Count |\n';
-          comment += '|----------|-------|\n';
-          comment += `| 🔴 Critical | ${summary.critical || 0} |\n`;
-          comment += `| 🟠 High | ${summary.high || 0} |\n`;
-          comment += `| 🟡 Medium | ${summary.medium || 0} |\n`;
-          comment += `| 🟢 Low | ${summary.low || 0} |\n`;
-          comment += `| ℹ️ Info | ${summary.info || 0} |\n\n`;
-          
-          // Top findings
-          if (findings && findings.length > 0) {
-            comment += '### Top Security Findings\n\n';
-            const topFindings = findings
-              .filter(f => ['CRITICAL', 'HIGH'].includes(f.severity))
-              .slice(0, 5);
-            
-            topFindings.forEach(finding => {
-              comment += `#### ${finding.severity}: ${finding.type}\n`;
-              comment += `- **File**: \`${finding.file_path}\`\n`;
-              comment += `- **Line**: ${finding.start_line}\n`;
-              comment += `- **Message**: ${finding.message}\n`;
-              if (finding.remediation_suggestion) {
-                comment += `- **Fix**: ${finding.remediation_suggestion}\n`;
+          # Call AI Security API
+          RESPONSE=$(aws lambda invoke \
+            --function-name ai-security-analyzer \
+            --payload '{
+              "action": "scan",
+              "scan_type": "'$SCAN_TYPE'",
+              "repository_url": "'$REPO_URL'",
+              "branch": "${{ github.ref_name }}",
+              "commit_sha": "${{ github.sha }}",
+              "scan_id": "'$SCAN_ID'",
+              "github_context": {
+                "event_name": "${{ github.event_name }}",
+                "pr_number": "${{ github.event.pull_request.number }}",
+                "actor": "${{ github.actor }}"
               }
-              comment += '\n';
-            });
-          }
+            }' \
+            --cli-binary-format raw-in-base64-out \
+            response.json)
           
-          // Dashboard link
-          comment += `\n### 📊 [View Full Dashboard](${scanResults.dashboard_url})\n`;
+          # Parse response
+          cat response.json
+          echo "scan_id=$SCAN_ID" >> $GITHUB_OUTPUT
+      
+      - name: Wait for Scan Completion
+        id: scan-status
+        run: |
+          SCAN_ID="${{ steps.security-scan.outputs.scan_id }}"
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
           
-          // Quality gate status
-          const qualityGatePassed = 
-            (summary.critical || 0) === 0 && 
-            (summary.high || 0) <= 5;
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            STATUS=$(aws dynamodb get-item \
+              --table-name security-scan-results \
+              --key '{"scan_id": {"S": "'$SCAN_ID'"}}' \
+              --query 'Item.status.S' \
+              --output text)
+            
+            if [[ "$STATUS" == "completed" || "$STATUS" == "failed" ]]; then
+              echo "Scan $STATUS"
+              echo "status=$STATUS" >> $GITHUB_OUTPUT
+              break
+            fi
+            
+            echo "Scan status: $STATUS (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+            sleep 10
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+      
+      - name: Retrieve Scan Results
+        if: steps.scan-status.outputs.status == 'completed'
+        id: results
+        run: |
+          SCAN_ID="${{ steps.security-scan.outputs.scan_id }}"
           
-          if (qualityGatePassed) {
-            comment += '\n✅ **Quality Gate: PASSED**';
-          } else {
-            comment += '\n❌ **Quality Gate: FAILED**';
-          }
+          # Get full results
+          aws dynamodb get-item \
+            --table-name security-scan-results \
+            --key '{"scan_id": {"S": "'$SCAN_ID'"}}' \
+            --output json > scan-results.json
           
-          // Post comment
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: comment
-          });
-    
-    - name: Fail on critical findings
-      if: steps.scan.outputs.scan_output != ''
-      run: |
-        CRITICAL_COUNT=$(echo '${{ steps.scan.outputs.scan_output }}' | jq -r '.summary.critical // 0')
-        HIGH_COUNT=$(echo '${{ steps.scan.outputs.scan_output }}' | jq -r '.summary.high // 0')
-        
-        if [ "$CRITICAL_COUNT" -gt 0 ]; then
-          echo "❌ Found $CRITICAL_COUNT critical security vulnerabilities!"
-          exit 1
-        fi
-        
-        if [ "$HIGH_COUNT" -gt 5 ]; then
-          echo "❌ Found $HIGH_COUNT high severity vulnerabilities (threshold: 5)!"
-          exit 1
-        fi
-        
-        echo "✅ Security scan passed quality gates"
-    
-    - name: Create GitHub issues for critical findings
-      if: github.event_name == 'schedule' && steps.scan.outputs.scan_output != ''
-      uses: actions/github-script@v7
-      env:
-        SCAN_OUTPUT: ${{ steps.scan.outputs.scan_output }}
-      with:
-        script: |
-          const scanResults = JSON.parse(process.env.SCAN_OUTPUT);
-          const criticalFindings = (scanResults.findings || [])
-            .filter(f => f.severity === 'CRITICAL');
+          # Extract summary
+          CRITICAL=$(jq -r '.Item.findings.M.critical.N // "0"' scan-results.json)
+          HIGH=$(jq -r '.Item.findings.M.high.N // "0"' scan-results.json)
+          MEDIUM=$(jq -r '.Item.findings.M.medium.N // "0"' scan-results.json)
+          LOW=$(jq -r '.Item.findings.M.low.N // "0"' scan-results.json)
           
-          for (const finding of criticalFindings) {
-            // Check if issue already exists
-            const existingIssues = await github.rest.issues.listForRepo({
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+          echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+          echo "low=$LOW" >> $GITHUB_OUTPUT
+          
+          # Generate report
+          python -m cli.ai_security report --scan-id $SCAN_ID --format markdown > security-report.md
+      
+      - name: Upload SARIF Results
+        if: steps.scan-status.outputs.status == 'completed'
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: scan-results.sarif
+          category: ai-security-audit
+      
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && steps.scan-status.outputs.status == 'completed'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('security-report.md', 'utf8');
+            
+            const critical = '${{ steps.results.outputs.critical }}';
+            const high = '${{ steps.results.outputs.high }}';
+            const medium = '${{ steps.results.outputs.medium }}';
+            const low = '${{ steps.results.outputs.low }}';
+            
+            const summary = `## 🔐 AI Security Audit Results
+            
+            **Scan Type:** ${{ steps.scan-config.outputs.scan_type }}
+            **Status:** ✅ Completed
+            
+            ### Finding Summary:
+            - 🔴 **Critical:** ${critical}
+            - 🟠 **High:** ${high}
+            - 🟡 **Medium:** ${medium}
+            - 🟢 **Low:** ${low}
+            
+            <details>
+            <summary>View Full Report</summary>
+            
+            ${report}
+            
+            </details>
+            
+            ---
+            *Generated by AI Security Audit Framework*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              labels: ['security', 'critical'],
-              state: 'open'
+              body: summary
             });
+      
+      - name: Fail on Critical/High Findings
+        if: steps.scan-status.outputs.status == 'completed'
+        run: |
+          CRITICAL=${{ steps.results.outputs.critical }}
+          HIGH=${{ steps.results.outputs.high }}
+          
+          if [[ $CRITICAL -gt 0 || $HIGH -gt 0 ]]; then
+            echo "❌ Security scan failed: Found $CRITICAL critical and $HIGH high severity findings"
+            exit 1
+          else
+            echo "✅ Security scan passed"
+          fi
+      
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-scan-results
+          path: |
+            scan-results.json
+            security-report.md
+            scan-results.sarif
+          retention-days: 30
+      
+      - name: Send Notifications
+        if: failure() && (github.event_name == 'push' || github.event_name == 'schedule')
+        run: |
+          # Send SNS notification for failures on main branches
+          aws sns publish \
+            --topic-arn ${{ secrets.SECURITY_ALERTS_SNS_TOPIC }} \
+            --subject "Security Scan Failed - ${{ github.repository }}" \
+            --message "Security scan failed for ${{ github.repository }} on branch ${{ github.ref_name }}. 
             
-            const issueExists = existingIssues.data.some(issue => 
-              issue.title.includes(finding.finding_id)
-            );
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Critical findings: ${{ steps.results.outputs.critical }}
+            High findings: ${{ steps.results.outputs.high }}
             
-            if (!issueExists) {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: `🔴 Critical Security: ${finding.type} - ${finding.finding_id}`,
-                body: `## Critical Security Vulnerability Detected
-                
-**Type**: ${finding.type}
-**Severity**: ${finding.severity}
-**File**: \`${finding.file_path}\`
-**Line**: ${finding.start_line}
+            View details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-### Description
-${finding.message}
-
-### Remediation
-${finding.remediation_suggestion || 'No automated remediation available'}
-
-### Additional Information
-- **CWE**: ${finding.cwe_id || 'N/A'}
-- **OWASP**: ${finding.owasp_category || 'N/A'}
-- **Detected by**: ${finding.agent_type}
-- **Scan ID**: ${scanResults.scan_id}
-
----
-*This issue was automatically created by the AI Security Scanner*`,
-                labels: ['security', 'critical', 'automated']
-              });
-            }
-          }
-
-  remediation:
-    name: Auto-remediation
-    needs: security-scan
+  hephaestus-cognitive-scan:
+    name: Hephaestus Cognitive Analysis
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'auto-remediate')
+    if: |
+      github.event_name == 'schedule' || 
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.scan_type == 'hephaestus')
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: Install AI Security CLI
-      run: |
-        pip install --upgrade pip
-        pip install -e .
-    
-    - name: Apply remediations
-      env:
-        API_ENDPOINT: ${{ secrets.SECURITY_API_ENDPOINT }}
-        API_AUTH_TOKEN: ${{ secrets.SECURITY_API_TOKEN }}
-      run: |
-        ai-security remediate \
-          --scan-id "${{ needs.security-scan.outputs.scan_id }}" \
-          --auto-apply \
-          --commit-message "🔧 Auto-remediate security vulnerabilities"
-    
-    - name: Push changes
-      run: |
-        git config --local user.email "ai-security[bot]@users.noreply.github.com"
-        git config --local user.name "AI Security Bot"
-        git add -A
-        git diff --staged --quiet || git commit -m "🔧 Auto-remediate security vulnerabilities"
-        git push
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Trigger Hephaestus Analysis
+        run: |
+          REPO_URL="https://github.com/${{ github.repository }}"
+          
+          # Trigger Hephaestus cognitive scan
+          aws lambda invoke \
+            --function-name ai-security-analyzer \
+            --payload '{
+              "action": "hephaestus_cognitive",
+              "repository_url": "'$REPO_URL'",
+              "branch": "${{ github.ref_name }}",
+              "deep_analysis": true,
+              "evolution_enabled": true
+            }' \
+            --cli-binary-format raw-in-base64-out \
+            hephaestus-response.json
+          
+          cat hephaestus-response.json
+      
+      - name: Store Evolution Insights
+        run: |
+          # Extract and store cognitive insights for future evolution
+          jq -r '.cognitive_insights' hephaestus-response.json > cognitive-insights.json
+          
+          # Upload to S3 for persistence
+          aws s3 cp cognitive-insights.json \
+            s3://${{ secrets.SECURITY_INSIGHTS_BUCKET }}/hephaestus/${{ github.repository }}/${{ github.sha }}/insights.json

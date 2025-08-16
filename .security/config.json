@@ -2,136 +2,83 @@
   "version": "1.0.0",
   "project": {
     "name": "AI Security Audit Framework",
-    "description": "AI-powered security scanning framework with multiple autonomous agents"
+    "description": "Enterprise-grade security scanning and remediation platform"
   },
-  "api": {
-    "endpoint": "${API_ENDPOINT}",
-    "auth_token": "${API_AUTH_TOKEN}",
-    "timeout": 300,
-    "retry_attempts": 3
+  "defaults": {
+    "region": "us-east-1",
+    "output": "json",
+    "scan_type": "comprehensive"
   },
-  "scanning": {
-    "default_priority": "normal",
-    "parallel_agents": 5,
-    "max_file_size_mb": 100,
-    "ignored_extensions": [
-      ".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico",
-      ".pdf", ".doc", ".docx", ".xls", ".xlsx",
-      ".zip", ".tar", ".gz", ".rar"
-    ],
-    "ignored_directories": [
-      "node_modules", "venv", ".venv", "__pycache__",
-      ".git", ".svn", ".hg", "dist", "build",
-      "coverage", ".pytest_cache", ".mypy_cache"
-    ]
+  "scan_options": {
+    "enable_ai_analysis": true,
+    "enable_hephaestus": true,
+    "enable_remediation": false,
+    "enable_notifications": true,
+    "parallel_scans": 5,
+    "timeout_minutes": 30
   },
-  "agents": {
-    "sast": {
-      "enabled": true,
-      "languages": ["python", "javascript", "java", "go", "ruby", "php"],
-      "rule_sets": ["owasp-top-10", "cwe-top-25", "sans-top-25"],
-      "custom_rules_path": ".security/rules/sast/"
-    },
-    "dependency": {
-      "enabled": true,
-      "check_licenses": true,
-      "allowed_licenses": [
-        "MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause",
-        "ISC", "MPL-2.0", "CC0-1.0"
-      ],
-      "vulnerability_databases": ["nvd", "osv", "github-advisory"]
-    },
-    "secrets": {
-      "enabled": true,
-      "entropy_threshold": 4.5,
-      "custom_patterns_path": ".security/rules/secrets/",
-      "exclude_test_files": true
-    },
-    "iac": {
-      "enabled": true,
-      "providers": ["aws", "azure", "gcp", "kubernetes"],
-      "compliance_frameworks": ["cis", "nist", "pci-dss", "hipaa"]
-    },
-    "container": {
-      "enabled": true,
-      "scan_dockerfile": true,
-      "scan_base_images": true,
-      "registries": {
-        "ecr": {
-          "region": "${AWS_REGION}",
-          "scan_on_push": true
-        }
-      }
-    }
+  "ai_config": {
+    "bedrock_model": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "max_retries": 3,
+    "temperature": 0.7,
+    "max_tokens": 4096
   },
-  "ai_features": {
-    "enabled": true,
-    "model": "anthropic.claude-3-sonnet-20240229-v1:0",
-    "temperature": 0.1,
-    "max_tokens": 4096,
-    "features": {
-      "auto_remediation": false,
-      "explain_findings": true,
-      "suggest_fixes": true,
-      "risk_scoring": true,
-      "false_positive_detection": true
-    }
-  },
-  "reporting": {
-    "formats": ["json", "html", "sarif", "junit"],
-    "output_directory": "./security-reports",
-    "include_code_snippets": true,
-    "max_snippet_lines": 10,
-    "dashboards": {
-      "quicksight": {
-        "enabled": true,
-        "auto_refresh": true
-      }
-    }
-  },
-  "integrations": {
-    "github": {
-      "enabled": true,
-      "create_issues": false,
-      "comment_on_pr": true,
-      "status_checks": true
-    },
-    "jenkins": {
-      "enabled": false,
-      "fail_on_high_severity": true
-    },
+  "notification_channels": {
     "slack": {
       "enabled": false,
-      "webhook_url": "${SLACK_WEBHOOK_URL}",
-      "notify_on": ["critical", "high"]
+      "webhook_param": "/security-audit/slack-webhook-url"
     },
     "teams": {
       "enabled": false,
-      "webhook_url": "${TEAMS_WEBHOOK_URL}",
-      "notify_on": ["critical", "high"]
-    }
-  },
-  "thresholds": {
-    "fail_on": {
-      "critical": 0,
-      "high": 5,
-      "medium": 20,
-      "low": -1
+      "webhook_param": "/security-audit/teams-webhook-url"
     },
-    "quality_gates": {
-      "security_score_minimum": 80,
-      "coverage_minimum": 70
+    "email": {
+      "enabled": false,
+      "sns_topic": "security-audit-alerts"
     }
   },
-  "cache": {
-    "enabled": true,
-    "directory": ".security/cache",
-    "ttl_hours": 24
+  "storage": {
+    "results_bucket": "security-scan-results-${AWS_ACCOUNT_ID}-${AWS_REGION}",
+    "retention_days": 90,
+    "encryption": "AWS_MANAGED"
   },
-  "logging": {
-    "level": "INFO",
-    "format": "json",
-    "output": "stdout",
-    "file": ".security/logs/security-audit.log"
+  "security_services": {
+    "guardduty": {
+      "enabled": true,
+      "threat_intel_sets": []
+    },
+    "security_hub": {
+      "enabled": true,
+      "standards": ["AWS_FOUNDATIONAL", "CIS_AWS", "PCI_DSS"]
+    },
+    "config": {
+      "enabled": true,
+      "rules": ["REQUIRED_TAGS", "S3_BUCKET_PUBLIC_READ_PROHIBITED"]
+    }
+  },
+  "scan_targets": {
+    "repositories": [],
+    "ecr_registries": [],
+    "lambda_functions": [],
+    "ecs_clusters": [],
+    "s3_buckets": []
+  },
+  "exclusions": {
+    "paths": [
+      "**/node_modules/**",
+      "**/.git/**",
+      "**/build/**",
+      "**/dist/**",
+      "**/__pycache__/**"
+    ],
+    "file_types": [
+      "*.log",
+      "*.tmp",
+      "*.cache"
+    ]
+  },
+  "custom_rules": {
+    "enabled": false,
+    "rules_path": ".security/custom_rules/"
   }
 }
