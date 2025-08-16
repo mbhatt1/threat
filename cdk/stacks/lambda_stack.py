@@ -252,12 +252,25 @@ class LambdaStack(Stack):
         self.remediation_lambda_arn = self.remediation_lambda.function_arn
         
         # AI Security Analyzer Lambda
-        self.ai_security_analyzer_lambda = lambda_python.PythonFunction(
+        # Create a code asset that includes both the lambda and ai_models directories
+        ai_analyzer_code = lambda_.Code.from_asset(
+            os.path.join("..", "src"),
+            bundling=lambda_.BundlingOptions(
+                image=lambda_.Runtime.PYTHON_3_11.bundling_image,
+                command=[
+                    "bash", "-c",
+                    "pip install -r lambdas/ai_security_analyzer/requirements.txt -t /asset-output && " +
+                    "cp -r lambdas/ai_security_analyzer/handler.py /asset-output/ && " +
+                    "cp -r ai_models /asset-output/"
+                ]
+            )
+        )
+        
+        self.ai_security_analyzer_lambda = lambda_.Function(
             self, "AISecurityAnalyzerLambda",
-            entry=os.path.join("..", "src", "lambdas", "ai_security_analyzer"),
+            code=ai_analyzer_code,
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="handler.lambda_handler",
-            index="handler.py",
             role=ai_security_role,
             vpc=vpc,
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),

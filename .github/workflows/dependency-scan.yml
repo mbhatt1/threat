@@ -1,0 +1,193 @@
+name: Dependency Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  python-dependency-scan:
+    name: Python Dependency Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Scan Lambda dependencies
+        run: |
+          echo "Scanning Lambda function dependencies..."
+          for req_file in $(find src/lambdas -name requirements.txt); do
+            echo "Scanning $req_file"
+            pip-audit -r "$req_file" --format json > "${req_file}.audit.json" || true
+            if [ -s "${req_file}.audit.json" ]; then
+              echo "Vulnerabilities found in $req_file:"
+              cat "${req_file}.audit.json" | jq '.vulnerabilities[]'
+            fi
+          done
+
+      - name: Scan CDK dependencies
+        run: |
+          echo "Scanning CDK dependencies..."
+          pip-audit -r cdk/requirements.txt --format json > cdk-audit.json || true
+          if [ -s cdk-audit.json ]; then
+            echo "Vulnerabilities found in CDK:"
+            cat cdk-audit.json | jq '.vulnerabilities[]'
+          fi
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: python-scan-results
+          path: |
+            **/*.audit.json
+            cdk-audit.json
+
+  container-scan:
+    name: Container Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Scan Dockerfiles
+        run: |
+          echo "Scanning Dockerfiles..."
+          for dockerfile in $(find . -name Dockerfile); do
+            echo "Scanning $dockerfile"
+            docker run --rm -v "$PWD":/src \
+              aquasec/trivy config --severity HIGH,CRITICAL \
+              --format json "/src/$dockerfile" > "${dockerfile}.scan.json" || true
+          done
+
+      - name: Build and scan container images
+        run: |
+          # Build and scan autonomous agent image
+          if [ -f src/agents/autonomous/Dockerfile ]; then
+            echo "Building and scanning autonomous agent image..."
+            docker build -t security-audit-autonomous:latest src/agents/autonomous/
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy image --severity HIGH,CRITICAL \
+              --format json security-audit-autonomous:latest > autonomous-image-scan.json || true
+          fi
+
+      - name: Upload container scan results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: container-scan-results
+          path: |
+            **/*.scan.json
+            autonomous-image-scan.json
+
+  license-check:
+    name: License Compliance Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install license checker
+        run: pip install pip-licenses
+
+      - name: Check licenses
+        run: |
+          echo "Checking licenses for Lambda functions..."
+          for req_file in $(find src/lambdas -name requirements.txt); do
+            dir=$(dirname "$req_file")
+            echo "Checking licenses in $dir"
+            cd "$dir"
+            pip install -r requirements.txt --quiet
+            pip-licenses --format=json --with-urls > licenses.json
+            # Check for problematic licenses
+            cat licenses.json | jq -r '.[] | select(.License | test("GPL|AGPL|SSPL")) | "\(.Name): \(.License)"' > problematic-licenses.txt || true
+            if [ -s problematic-licenses.txt ]; then
+              echo "WARNING: Problematic licenses found:"
+              cat problematic-licenses.txt
+            fi
+            cd - > /dev/null
+          done
+
+  security-report:
+    name: Generate Security Report
+    needs: [python-dependency-scan, container-scan, license-check]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Generate consolidated report
+        run: |
+          echo "# Security Scan Report" > security-report.md
+          echo "Generated on: $(date)" >> security-report.md
+          echo "" >> security-report.md
+          
+          echo "## Python Dependency Vulnerabilities" >> security-report.md
+          find . -name "*.audit.json" -exec cat {} \; | jq -s 'add' > all-python-vulns.json || true
+          if [ -s all-python-vulns.json ]; then
+            echo "Found $(cat all-python-vulns.json | jq '.vulnerabilities | length') vulnerabilities" >> security-report.md
+          else
+            echo "No Python vulnerabilities found" >> security-report.md
+          fi
+          
+          echo "" >> security-report.md
+          echo "## Container Scan Results" >> security-report.md
+          find . -name "*.scan.json" -exec cat {} \; > all-container-issues.json || true
+          if [ -s all-container-issues.json ]; then
+            echo "Container security issues found - see detailed reports" >> security-report.md
+          else
+            echo "No container security issues found" >> security-report.md
+          fi
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-report
+          path: security-report.md
+
+      - name: Comment PR with results
+        uses: actions/github-script@v6
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('security-report.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });

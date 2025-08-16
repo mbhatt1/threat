@@ -13,7 +13,15 @@ from typing import Dict, Any, List
 from datetime import datetime
 
 # Add parent directories to path
-sys.path.append(str(Path(__file__).parent.parent.parent))
+# When deployed via CDK bundling, ai_models/ will be at the same level as handler.py
+# For local development, we need to go up to src/
+current_dir = Path(__file__).parent
+if (current_dir / 'ai_models').exists():
+    # Deployed scenario - ai_models is in the same directory
+    sys.path.append(str(current_dir))
+else:
+    # Local development - ai_models is at src/ai_models
+    sys.path.append(str(current_dir.parent.parent))
 
 # Import AI components
 from ai_models.sql_injection_detector import SQLInjectionDetector
