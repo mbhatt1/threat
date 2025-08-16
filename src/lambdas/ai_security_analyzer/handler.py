@@ -11,6 +11,13 @@ from pathlib import Path
 import asyncio
 from typing import Dict, Any, List
 from datetime import datetime
+import logging
+import subprocess
+import tempfile
+
+# Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 # Add parent directories to path
 # When deployed via CDK bundling, ai_models/ will be at the same level as handler.py
@@ -84,6 +91,9 @@ def handler(event, context):
     payload = event.get('payload', {})
     
     try:
+        logger.info(f"Received action: {action}")
+        logger.info(f"Payload: {json.dumps(payload)[:500]}")  # Log first 500 chars
+        
         if action == 'analyze_sql':
             return handle_sql_analysis(payload)
         elif action == 'threat_intel':
@@ -112,6 +122,7 @@ def handler(event, context):
             }
             
     except Exception as e:
+        logger.error(f"Error handling action {action}: {str(e)}", exc_info=True)
         return {
             'statusCode': 500,
             'body': json.dumps({
@@ -429,17 +440,23 @@ def handle_hephaestus_cognitive(payload: Dict[str, Any]) -> Dict[str, Any]:
     Handle Hephaestus Cognitive AI analysis
     This advanced system uses 6-phase cognitive flow for deep vulnerability discovery
     """
+    # Handle different payload formats (from SNS, EventBridge, API)
+    repository_url = payload.get('repository_url')
     s3_bucket = payload.get('repository_s3_bucket')
     s3_key = payload.get('repository_s3_key')
-    max_iterations = payload.get('max_iterations', 2)
-    severity_filter = payload.get('severity_filter')
+    repository_path = payload.get('repository_path')
     
-    # Check if we have S3 location or local path
-    if not s3_bucket and not payload.get('repository_path'):
+    # Map parameters
+    max_iterations = payload.get('max_iterations', payload.get('max_vulnerabilities', 2))
+    severity_filter = payload.get('severity_filter')
+    branch = payload.get('branch', 'main')
+    
+    # Check if we have repository location
+    if not repository_url and not s3_bucket and not repository_path:
         return {
             'statusCode': 400,
             'body': json.dumps({
-                'error': 'Either repository_s3_bucket/key or repository_path is required'
+                'error': 'Either repository_url, repository_s3_bucket/key, or repository_path is required'
             })
         }
     
@@ -447,8 +464,30 @@ def handle_hephaestus_cognitive(payload: Dict[str, Any]) -> Dict[str, Any]:
     asyncio.set_event_loop(loop)
     
     try:
+        logger.info(f"[HEPHAESTUS] Starting analysis - URL: {repository_url}, S3: {s3_bucket}/{s3_key}")
+        
+        # Handle repository URL (clone from git)
+        if repository_url and not s3_bucket:
+            # Clone repository to /tmp
+            repo_dir = tempfile.mkdtemp(dir='/tmp')
+            clone_cmd = ['git', 'clone', '--depth', '1', '--branch', branch, repository_url, repo_dir]
+            
+            try:
+                logger.info(f"[HEPHAESTUS] Cloning repository: {repository_url}")
+                result = subprocess.run(clone_cmd, check=True, capture_output=True, text=True)
+                repo_path = repo_dir
+                logger.info(f"[HEPHAESTUS] Repository cloned successfully to {repo_path}")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"[HEPHAESTUS] Failed to clone repository: {e.stderr}")
+                return {
+                    'statusCode': 500,
+                    'body': json.dumps({
+                        'error': f'Failed to clone repository: {e.stderr}'
+                    })
+                }
+                
         # If S3 location provided, download the repository
-        if s3_bucket and s3_key:
+        elif s3_bucket and s3_key:
             s3_client = boto3.client('s3')
             # Download to /tmp in Lambda
             local_path = f"/tmp/{s3_key.split('/')[-1]}"
@@ -467,9 +506,11 @@ def handle_hephaestus_cognitive(payload: Dict[str, Any]) -> Dict[str, Any]:
             repo_path = payload.get('repository_path')
         
         # Run Hephaestus analysis
+        logger.info(f"[HEPHAESTUS] Starting cognitive analysis on {repo_path}")
         results = loop.run_until_complete(
             hephaestus_ai.analyze(repo_path, max_iterations)
         )
+        logger.info(f"[HEPHAESTUS] Analysis complete - found {results['total_chains']} vulnerability chains")
         
         # Filter by severity if requested
         chains = results['chains']
@@ -503,7 +544,9 @@ def handle_hephaestus_cognitive(payload: Dict[str, Any]) -> Dict[str, Any]:
         if len(chains) > 50 or any(chain.poc_code for chain in chains):
             # Store full results including POCs in S3
             result_bucket = os.environ.get('RESULTS_BUCKET', s3_bucket)
-            result_key = f"hephaestus-results/{context.request_id}.json"
+            # Generate unique key for results
+            request_id = datetime.utcnow().strftime('%Y%m%d%H%M%S') + '-' + os.urandom(4).hex()
+            result_key = f"hephaestus-results/{request_id}.json"
             
             # Convert chains to serializable format
             full_results = {
@@ -561,6 +604,7 @@ def handle_hephaestus_cognitive(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
         
     except Exception as e:
+        logger.error(f"[HEPHAESTUS] Analysis failed: {str(e)}", exc_info=True)
         return {
             'statusCode': 500,
             'body': json.dumps({
